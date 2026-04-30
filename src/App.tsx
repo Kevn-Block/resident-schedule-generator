@@ -267,10 +267,22 @@ export default function App() {
             <FileDown aria-hidden="true" size={18} />
             XLSX
           </button>
-          <button className="icon-button" type="button" onClick={() => downloadJson(state)} title="Export JSON">
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => downloadJson(state)}
+            title="Export JSON"
+            aria-label="Export schedule as JSON"
+          >
             <Download aria-hidden="true" size={18} />
           </button>
-          <button className="icon-button" type="button" onClick={() => importRef.current?.click()} title="Import JSON">
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => importRef.current?.click()}
+            title="Import JSON"
+            aria-label="Import schedule from JSON"
+          >
             <FileUp aria-hidden="true" size={18} />
           </button>
           <input ref={importRef} className="visually-hidden" type="file" accept="application/json" onChange={handleImport} />
@@ -357,7 +369,7 @@ function ResidentsPanel({ state, blocks, onAdd, onUpdate, onDelete, onPtoChange 
           <p className="eyebrow">Setup</p>
           <h2>Residents & PTO</h2>
         </div>
-        <button className="icon-button" type="button" onClick={onAdd} title="Add resident">
+        <button className="icon-button" type="button" onClick={onAdd} title="Add resident" aria-label="Add resident">
           <Plus aria-hidden="true" size={18} />
         </button>
       </div>
@@ -390,7 +402,13 @@ function ResidentsPanel({ state, blocks, onAdd, onUpdate, onDelete, onPtoChange 
                   />
                   Chief
                 </label>
-                <button className="icon-button danger" type="button" onClick={() => onDelete(resident.id)} title="Delete resident">
+                <button
+                  className="icon-button danger"
+                  type="button"
+                  onClick={() => onDelete(resident.id)}
+                  title="Delete resident"
+                  aria-label={`Delete ${resident.name || "resident"}`}
+                >
                   <Trash2 aria-hidden="true" size={16} />
                 </button>
               </div>
@@ -485,11 +503,11 @@ function RotationsPanel({ state, onUpdate, onAdd, onDelete }: RotationsPanelProp
           <p className="eyebrow">Capacity</p>
           <h2>Rotations</h2>
         </div>
-        <button className="icon-button" type="button" onClick={onAdd} title="Add custom rotation">
+        <button className="icon-button" type="button" onClick={onAdd} title="Add custom rotation" aria-label="Add custom rotation">
           <Plus aria-hidden="true" size={18} />
         </button>
       </div>
-      <div className="compact-table-wrap">
+      <div className="compact-table-wrap" role="region" aria-label="Rotation capacity settings" tabIndex={0}>
         <table className="compact-table">
           <thead>
             <tr>
@@ -538,7 +556,13 @@ function RotationsPanel({ state, onUpdate, onAdd, onDelete }: RotationsPanelProp
                 </td>
                 <td>
                   {!rotation.builtIn && (
-                    <button className="icon-button danger" type="button" onClick={() => onDelete(rotation.id)} title="Delete rotation">
+                    <button
+                      className="icon-button danger"
+                      type="button"
+                      onClick={() => onDelete(rotation.id)}
+                      title="Delete rotation"
+                      aria-label={`Delete ${rotation.name}`}
+                    >
                       <Trash2 aria-hidden="true" size={16} />
                     </button>
                   )}
@@ -570,11 +594,11 @@ function BlocksPanel({
           <p className="eyebrow">Year</p>
           <h2>Blocks</h2>
         </div>
-        <button className="icon-button" type="button" onClick={onAdd} title="Add block">
+        <button className="icon-button" type="button" onClick={onAdd} title="Add block" aria-label="Add block">
           <Plus aria-hidden="true" size={18} />
         </button>
       </div>
-      <div className="compact-table-wrap short">
+      <div className="compact-table-wrap short" role="region" aria-label="Block date settings" tabIndex={0}>
         <table className="compact-table">
           <thead>
             <tr>
@@ -597,7 +621,13 @@ function BlocksPanel({
                   <input type="date" value={block.endDate} onChange={(event) => onUpdate(block.id, { endDate: event.target.value })} />
                 </td>
                 <td>
-                  <button className="icon-button danger" type="button" onClick={() => onDelete(block.id)} title="Delete block">
+                  <button
+                    className="icon-button danger"
+                    type="button"
+                    onClick={() => onDelete(block.id)}
+                    title="Delete block"
+                    aria-label={`Delete block ${block.name}`}
+                  >
                     <Trash2 aria-hidden="true" size={16} />
                   </button>
                 </td>
@@ -629,7 +659,7 @@ function ScheduleGrid({
   }
 
   return (
-    <div className="schedule-wrap">
+    <div className="schedule-wrap" role="region" aria-label="Resident block schedule grid" tabIndex={0}>
       <table className="schedule-grid">
         <thead>
           <tr>
