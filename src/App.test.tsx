@@ -32,6 +32,18 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: /Add resident at bottom/i })).toBeInTheDocument();
   });
 
+  it("names icon-only actions for assistive technology", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Demo/i }));
+
+    expect(screen.getByRole("button", { name: "Export schedule as JSON" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import schedule from JSON" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add resident" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete Avery Chen" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Resident block schedule grid" })).toBeInTheDocument();
+  });
+
   it("shows an elective label input when an assignment is Elective", () => {
     render(<App />);
 

@@ -23,10 +23,12 @@ button,
 input,
 select {
   font: inherit;
+  line-height: 1.2;
 }
 
 button {
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 .app-shell {
@@ -89,6 +91,16 @@ button {
     transform 140ms ease;
 }
 
+.button:focus-visible,
+.icon-button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+.compact-table-wrap:focus-visible,
+.schedule-wrap:focus-visible {
+  outline: 3px solid #2f7f62;
+  outline-offset: 2px;
+}
+
 .button:hover,
 .icon-button:hover {
   background: #f1f7f3;
@@ -112,8 +124,11 @@ button {
 
 .icon-button {
   aspect-ratio: 1;
+  flex: 0 0 auto;
+  height: 38px;
   min-width: 38px;
   padding: 8px;
+  width: 38px;
 }
 
 .icon-button.danger {
@@ -178,12 +193,14 @@ button {
 .schedule-column {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .panel {
   background: #ffffff;
   border: 1px solid #d9dfdb;
   border-radius: 8px;
+  min-width: 0;
   padding: 16px;
 }
 
@@ -260,6 +277,7 @@ input[type="checkbox"] {
   align-items: center;
   display: inline-flex;
   gap: 6px;
+  min-width: 0;
   white-space: nowrap;
 }
 
@@ -292,7 +310,9 @@ input[type="checkbox"] {
 }
 
 .compact-table-wrap {
+  max-width: 100%;
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .compact-table-wrap.short {
@@ -301,7 +321,11 @@ input[type="checkbox"] {
 
 .compact-table {
   border-collapse: collapse;
-  min-width: 100%;
+  min-width: max(100%, 440px);
+}
+
+.compact-table-wrap.short .compact-table {
+  min-width: max(100%, 540px);
 }
 
 .compact-table th,
@@ -330,7 +354,9 @@ input[type="checkbox"] {
   border: 1px solid #d9dfdb;
   border-radius: 8px;
   max-height: 620px;
+  max-width: 100%;
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .schedule-grid {
@@ -489,14 +515,107 @@ input[type="checkbox"] {
     padding: 14px;
   }
 
-  .resident-fields,
+  .topbar h1 {
+    font-size: 24px;
+  }
+
+  .topbar-actions {
+    align-items: stretch;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .topbar-actions .button,
+  .topbar-actions .icon-button {
+    width: 100%;
+  }
+
+  .topbar-actions .icon-button {
+    aspect-ratio: auto;
+  }
+
+  .button,
+  .icon-button,
+  input,
+  select {
+    min-height: 44px;
+  }
+
+  .icon-button {
+    height: 44px;
+    min-width: 44px;
+    padding: 10px;
+    width: 44px;
+  }
+
+  .compact-button {
+    min-height: 44px;
+    padding: 10px 12px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .resident-fields {
+    align-items: center;
+    grid-template-columns: minmax(96px, 1fr) auto 44px;
+  }
+
+  .resident-fields > input:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .resident-fields > select {
+    min-width: 96px;
+  }
+
+  .resident-fields > .check-label {
+    min-height: 44px;
+    padding-inline: 2px;
+  }
+
+  .resident-fields > .icon-button {
+    justify-self: end;
+  }
+
   .rule-grid,
   .pto-strip {
     grid-template-columns: 1fr;
   }
 
+  .pto-strip {
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    max-height: 260px;
+  }
+
   .status-strip {
     align-items: flex-start;
     flex-direction: column;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .status-strip > div {
+    gap: 8px;
+  }
+
+  .schedule-wrap {
+    max-height: 70vh;
+  }
+
+  .schedule-grid {
+    min-width: 1080px;
+  }
+
+  .schedule-grid th,
+  .schedule-grid td {
+    min-width: 108px;
+    padding: 6px;
+  }
+
+  .sticky-col {
+    min-width: 136px;
   }
 }
