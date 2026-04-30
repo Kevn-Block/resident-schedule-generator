@@ -28,6 +28,26 @@ function hasEarlyPgy2PairForPgy3(state: AppState, resident: Resident) {
   );
 }
 
+function backToBackMedicineNightsPairs(state: AppState, resident: Resident) {
+  const blocks = orderedBlocks(state);
+  const pairs: string[] = [];
+
+  for (let index = 0; index < blocks.length - 1; index += 1) {
+    const currentHasMedicineNights = (["medicine", "nights"] as const).some((rotationId) =>
+      hasAnyRotation(state.assignments[resident.id]?.[blocks[index].id], rotationId)
+    );
+    const nextHasMedicineNights = (["medicine", "nights"] as const).some((rotationId) =>
+      hasAnyRotation(state.assignments[resident.id]?.[blocks[index + 1].id], rotationId)
+    );
+
+    if (currentHasMedicineNights && nextHasMedicineNights) {
+      pairs.push(`${blocks[index].name}+${blocks[index + 1].name}`);
+    }
+  }
+
+  return pairs;
+}
+
 describe("generateSchedule", () => {
   it("generates a valid schedule for the demo cohort", () => {
     const result = generateSchedule(createDemoState());
@@ -44,6 +64,9 @@ describe("generateSchedule", () => {
     ).toBe(false);
     expect(result.diagnostics.some((diagnostic) => diagnostic.code === "preference.pgy3-early-pairing")).toBe(false);
     expect(result.diagnostics.some((diagnostic) => diagnostic.code === "preference.early-med-nights-load")).toBe(false);
+    for (const resident of result.state.residents) {
+      expect(backToBackMedicineNightsPairs(result.state, resident)).toEqual([]);
+    }
   });
 
   it("attempts ICU followed by POCUS for every PGY2 in the demo cohort", () => {
