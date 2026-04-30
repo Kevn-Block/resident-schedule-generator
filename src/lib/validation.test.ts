@@ -251,15 +251,22 @@ describe("validateSchedule", () => {
     expect(describeCell(state.assignments[pgy2.id][blockId("1A")], state.rotations)).toBe("Medicine");
   });
 
-  it("warns but does not fail when Medicine and Nights are adjacent", () => {
+  it.each([
+    ["medicine", "medicine"],
+    ["medicine", "nights"],
+    ["nights", "medicine"],
+    ["nights", "nights"]
+  ] as const)("fails when %s and %s are adjacent", (currentRotation, nextRotation) => {
     const pgy2 = resident("pgy2", 2);
     const state = stateWith([pgy2]);
-    state.assignments[pgy2.id][blockId("1A")] = fullRotationCell("medicine");
-    state.assignments[pgy2.id][blockId("1B")] = fullRotationCell("nights");
+    state.assignments[pgy2.id][blockId("1A")] = fullRotationCell(currentRotation);
+    state.assignments[pgy2.id][blockId("1B")] = fullRotationCell(nextRotation);
 
     const diagnostics = validateSchedule(state);
+    const backToBackDiagnostics = diagnostics.filter((item) => item.code === "resident.back-to-back-medicine-nights");
 
-    expect(diagnostics.some((item) => item.code === "preference.medicine-nights-adjacent")).toBe(true);
-    expect(hasErrors(diagnostics.filter((item) => item.code === "preference.medicine-nights-adjacent"))).toBe(false);
+    expect(backToBackDiagnostics).toHaveLength(1);
+    expect(backToBackDiagnostics[0].severity).toBe("error");
+    expect(hasErrors(backToBackDiagnostics)).toBe(true);
   });
 });

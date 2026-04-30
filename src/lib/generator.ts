@@ -79,9 +79,22 @@ function capacityAllows(state: AppState, block: Block, rotationId: string, addit
   return rotationCreditsByBlock(state, block.id, rotationId) + additionalCredit <= rotation.maxPerBlock + 0.001;
 }
 
+function hasAdjacentMedicineNights(state: AppState, resident: Resident, block: Block) {
+  const blocks = orderedBlocks(state);
+  const index = blocks.findIndex((candidate) => candidate.id === block.id);
+  const adjacentBlocks = [index > 0 ? blocks[index - 1] : undefined, index >= 0 ? blocks[index + 1] : undefined];
+
+  return adjacentBlocks.some(
+    (candidate) =>
+      candidate &&
+      MEDICINE_NIGHTS.some((rotationId) => hasAnyRotation(state.assignments[resident.id]?.[candidate.id], rotationId))
+  );
+}
+
 function canPlaceFull(state: AppState, resident: Resident, block: Block, rotationId: string) {
   const cell = state.assignments[resident.id]?.[block.id];
   if (hasFullBlockRotation(cell, rotationId)) return true;
+  if (isMedicineNightsRotation(rotationId) && hasAdjacentMedicineNights(state, resident, block)) return false;
   return Boolean(cell && isEmptyCell(cell) && capacityAllows(state, block, rotationId, 1));
 }
 

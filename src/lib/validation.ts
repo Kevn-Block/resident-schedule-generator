@@ -190,24 +190,26 @@ function validateCoverage(state: AppState, diagnostics: Diagnostic[]) {
   }
 }
 
+function medicineNightsRotationNames(state: AppState, resident: Resident, block: Block): string[] {
+  return MEDICINE_NIGHTS.filter((rotationId) => hasAnyRotation(state.assignments[resident.id]?.[block.id], rotationId)).map(
+    (rotationId) => (rotationId === "medicine" ? "Medicine" : "Nights")
+  );
+}
+
 function validateMedicineNightsTransitions(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
   const blocks = orderedBlocks(state);
   for (let index = 0; index < blocks.length - 1; index += 1) {
     const current = blocks[index];
     const next = blocks[index + 1];
-    const medicineToNights =
-      hasFullBlockRotation(state.assignments[resident.id]?.[current.id], "medicine") &&
-      hasFullBlockRotation(state.assignments[resident.id]?.[next.id], "nights");
-    const nightsToMedicine =
-      hasFullBlockRotation(state.assignments[resident.id]?.[current.id], "nights") &&
-      hasFullBlockRotation(state.assignments[resident.id]?.[next.id], "medicine");
+    const currentRotations = medicineNightsRotationNames(state, resident, current);
+    const nextRotations = medicineNightsRotationNames(state, resident, next);
 
-    if (medicineToNights || nightsToMedicine) {
+    if (currentRotations.length > 0 && nextRotations.length > 0) {
       pushDiagnostic(
         diagnostics,
-        "warning",
-        "preference.medicine-nights-adjacent",
-        `${resident.name} has ${medicineToNights ? "Medicine followed by Nights" : "Nights followed by Medicine"} in ${current.name} + ${next.name}; avoiding back-to-back Medicine/Nights is preferred.`,
+        "error",
+        "resident.back-to-back-medicine-nights",
+        `${resident.name} has back-to-back ${currentRotations.join("/")} and ${nextRotations.join("/")} in ${current.name} + ${next.name}; Medicine and Nights blocks cannot be adjacent.`,
         { residentId: resident.id, blockId: current.id }
       );
     }
