@@ -2,6 +2,7 @@ import type { AppState, Block, Diagnostic, GenerationResult, Resident } from "..
 import {
   applyPtoToAssignments,
   cellCredit,
+  cellContainsPto,
   createAssignmentMatrix,
   fullRotationCell,
   hasAnyRotation,
@@ -19,8 +20,20 @@ type Rng = () => number;
 
 const MEDICINE_NIGHTS = ["medicine", "nights"] as const;
 const EARLY_MEDICINE_NIGHTS_CAP = 3;
+const MEDICINE_NIGHTS_TOTAL_CAP = 3;
 
 type MedicineNightsRotation = (typeof MEDICINE_NIGHTS)[number];
+
+interface DiagnosticScore {
+  guardrailErrors: number;
+  pgy3Before10AErrors: number;
+  sameMedicineNightsTransitionErrors: number;
+  nightsToMedicineTransitionErrors: number;
+  medicineToNightsTransitionErrors: number;
+  otherResidentErrors: number;
+  warnings: number;
+  infos: number;
+}
 
 function seededRng(seed: number): Rng {
   let value = seed || 1;
@@ -73,10 +86,22 @@ function blocksFromNames(state: AppState, names: string[]) {
   return orderedBlocks(state).filter((block) => wanted.has(block.name.toLowerCase()));
 }
 
+function coverageBlocks(state: AppState) {
+  const block10A = blockByName(state, "10A");
+  const blocks = orderedBlocks(state);
+  if (!block10A) return blocks;
+  return [...blocks.filter((block) => block.order >= block10A.order), ...blocks.filter((block) => block.order < block10A.order)];
+}
+
 function capacityAllows(state: AppState, block: Block, rotationId: string, additionalCredit: number) {
   const rotation = rotationById(state.rotations, rotationId);
   if (!rotation) return false;
   return rotationCreditsByBlock(state, block.id, rotationId) + additionalCredit <= rotation.maxPerBlock + 0.001;
+}
+
+function residentRotationCapAllows(state: AppState, resident: Resident, rotationId: string, additionalCredit: number) {
+  if (!isMedicineNightsRotation(rotationId)) return true;
+  return rotationCreditForResident(state, resident, rotationId) + additionalCredit <= MEDICINE_NIGHTS_TOTAL_CAP + 0.001;
 }
 
 function hasAdjacentMedicineNights(state: AppState, resident: Resident, block: Block) {
@@ -91,11 +116,21 @@ function hasAdjacentMedicineNights(state: AppState, resident: Resident, block: B
   );
 }
 
+function blockHasRotation(state: AppState, block: Block, rotationId: string) {
+  return state.residents.some((resident) => hasAnyRotation(state.assignments[resident.id]?.[block.id], rotationId));
+}
+
 function canPlaceFull(state: AppState, resident: Resident, block: Block, rotationId: string) {
   const cell = state.assignments[resident.id]?.[block.id];
   if (hasFullBlockRotation(cell, rotationId)) return true;
   if (isMedicineNightsRotation(rotationId) && hasAdjacentMedicineNights(state, resident, block)) return false;
-  return Boolean(cell && isEmptyCell(cell) && capacityAllows(state, block, rotationId, 1));
+  return Boolean(cell && isEmptyCell(cell) && capacityAllows(state, block, rotationId, 1) && residentRotationCapAllows(state, resident, rotationId, 1));
+}
+
+function canPlaceFullIgnoringMedicineNightsAdjacency(state: AppState, resident: Resident, block: Block, rotationId: string) {
+  const cell = state.assignments[resident.id]?.[block.id];
+  if (hasFullBlockRotation(cell, rotationId)) return true;
+  return Boolean(cell && isEmptyCell(cell) && capacityAllows(state, block, rotationId, 1) && residentRotationCapAllows(state, resident, rotationId, 1));
 }
 
 function placeFull(state: AppState, resident: Resident, block: Block, rotationId: string) {
@@ -110,13 +145,18 @@ function placeRotationWithHalfPto(state: AppState, resident: Resident, block: Bl
   if (hasFullBlockRotation(cell, rotationId)) return 0;
   if (hasAnyRotation(cell, rotationId)) return 0;
 
-  if (isEmptyCell(cell) && capacityAllows(state, block, rotationId, 1)) {
+  if (isEmptyCell(cell) && capacityAllows(state, block, rotationId, 1) && residentRotationCapAllows(state, resident, rotationId, 1)) {
     state.assignments[resident.id][block.id] = fullRotationCell(rotationId);
     return 1;
   }
 
   const rotation = rotationById(state.rotations, rotationId);
-  if (!rotation?.canSplitWithHalfPto || !isHalfPto(cell) || !capacityAllows(state, block, rotationId, 0.5)) {
+  if (
+    !rotation?.canSplitWithHalfPto ||
+    !isHalfPto(cell) ||
+    !capacityAllows(state, block, rotationId, 0.5) ||
+    !residentRotationCapAllows(state, resident, rotationId, 0.5)
+  ) {
     return 0;
   }
 
@@ -216,25 +256,36 @@ function preferredPgy3PairResidents(state: AppState, block: Block, rotationId: s
   });
 }
 
-function oppositeMedicineNightsRotation(rotationId: string) {
-  if (rotationId === "medicine") return "nights";
-  if (rotationId === "nights") return "medicine";
-  return undefined;
+function medicineNightsTransitionPenalty(firstRotationId: MedicineNightsRotation, secondRotationId: MedicineNightsRotation) {
+  if (firstRotationId === secondRotationId) return 120;
+  if (firstRotationId === "nights" && secondRotationId === "medicine") return 80;
+  return 40;
 }
 
-function hasAdjacentOppositeMedicineNights(state: AppState, resident: Resident, block: Block, rotationId: string) {
-  const opposite = oppositeMedicineNightsRotation(rotationId);
-  if (!opposite) return false;
+function medicineNightsAdjacencyPenalty(state: AppState, resident: Resident, block: Block, rotationId: string) {
+  if (!isMedicineNightsRotation(rotationId)) return 0;
 
   const blocks = orderedBlocks(state);
   const index = blocks.findIndex((candidate) => candidate.id === block.id);
   const previous = index > 0 ? blocks[index - 1] : undefined;
   const next = index >= 0 && index < blocks.length - 1 ? blocks[index + 1] : undefined;
+  let penalty = 0;
 
-  return Boolean(
-    (previous && hasFullBlockRotation(state.assignments[resident.id]?.[previous.id], opposite)) ||
-      (next && hasFullBlockRotation(state.assignments[resident.id]?.[next.id], opposite))
-  );
+  if (previous) {
+    for (const previousRotationId of MEDICINE_NIGHTS) {
+      if (!hasAnyRotation(state.assignments[resident.id]?.[previous.id], previousRotationId)) continue;
+      penalty += medicineNightsTransitionPenalty(previousRotationId, rotationId);
+    }
+  }
+
+  if (next) {
+    for (const nextRotationId of MEDICINE_NIGHTS) {
+      if (!hasAnyRotation(state.assignments[resident.id]?.[next.id], nextRotationId)) continue;
+      penalty += medicineNightsTransitionPenalty(rotationId, nextRotationId);
+    }
+  }
+
+  return penalty;
 }
 
 function isMedicineNightsRotation(rotationId: string): rotationId is MedicineNightsRotation {
@@ -253,8 +304,9 @@ function earlyMedicineNightsPlacementPenalty(state: AppState, resident: Resident
 
 function medicineNightsBlockPreferenceScore(state: AppState, resident: Resident, block: Block, rotationId: string) {
   let score = earlyMedicineNightsPlacementPenalty(state, resident, block, rotationId);
-  if (hasAdjacentOppositeMedicineNights(state, resident, block, rotationId)) {
-    score += 10;
+  score += medicineNightsAdjacencyPenalty(state, resident, block, rotationId);
+  if (isMedicineNightsRotation(rotationId) && blockHasRotation(state, block, rotationId)) {
+    score += 500;
   }
   return score;
 }
@@ -314,9 +366,13 @@ function medicineNightsNeedScore(state: AppState, resident: Resident, block: Blo
   return Math.max(0, target - rotationCreditForResident(state, resident, rotationId, before10A));
 }
 
-function coverageCandidates(state: AppState, block: Block, rotationId: MedicineNightsRotation, rng: Rng) {
+function coverageCandidates(state: AppState, block: Block, rotationId: MedicineNightsRotation, rng: Rng, allowResidentRuleOverride = false) {
   return shuffled(state.residents, rng)
-    .filter((resident) => canPlaceFull(state, resident, block, rotationId))
+    .filter((resident) =>
+      allowResidentRuleOverride
+        ? canPlaceFullIgnoringMedicineNightsAdjacency(state, resident, block, rotationId)
+        : canPlaceFull(state, resident, block, rotationId)
+    )
     .sort((first, second) => {
       const firstNeed = medicineNightsNeedScore(state, first, block, rotationId);
       const secondNeed = medicineNightsNeedScore(state, second, block, rotationId);
@@ -330,8 +386,8 @@ function coverageCandidates(state: AppState, block: Block, rotationId: MedicineN
 
       if (firstNeed !== secondNeed) return secondNeed - firstNeed;
 
-      const firstAdjacentPenalty = hasAdjacentOppositeMedicineNights(state, first, block, rotationId) ? 1 : 0;
-      const secondAdjacentPenalty = hasAdjacentOppositeMedicineNights(state, second, block, rotationId) ? 1 : 0;
+      const firstAdjacentPenalty = medicineNightsAdjacencyPenalty(state, first, block, rotationId);
+      const secondAdjacentPenalty = medicineNightsAdjacencyPenalty(state, second, block, rotationId);
       if (firstAdjacentPenalty !== secondAdjacentPenalty) return firstAdjacentPenalty - secondAdjacentPenalty;
 
       return assignedCreditForResident(state, first) - assignedCreditForResident(state, second);
@@ -472,6 +528,174 @@ function placeUntilCredit(
   return currentCredit + 0.001 >= targetCredit;
 }
 
+function targetPgy3MedicineNightsCredit(state: AppState, rotationId: MedicineNightsRotation) {
+  return rotationId === "medicine" ? state.requirements.pgy3Medicine : state.requirements.pgy3Nights;
+}
+
+function rotationCreditsInCell(state: AppState, resident: Resident, block: Block) {
+  const cell = state.assignments[resident.id]?.[block.id];
+  const credits = new Map<string, number>();
+  if (!cell) return credits;
+
+  for (const segment of [cell.firstHalf, cell.secondHalf]) {
+    if (segment.kind !== "rotation" || !segment.rotationId) continue;
+    credits.set(segment.rotationId, (credits.get(segment.rotationId) ?? 0) + 0.5);
+  }
+
+  return credits;
+}
+
+function canRemoveRotationCredit(state: AppState, block: Block, rotationId: string, credit: number) {
+  const rotation = rotationById(state.rotations, rotationId);
+  if (!rotation) return false;
+  return rotationCreditsByBlock(state, block.id, rotationId) - credit >= rotation.minPerBlock - 0.001;
+}
+
+function preservesMedicineNightsCoverageAfterReplacement(
+  state: AppState,
+  resident: Resident,
+  block: Block,
+  rotationId: MedicineNightsRotation
+) {
+  const cell = state.assignments[resident.id]?.[block.id];
+  if (!cell) return false;
+
+  return MEDICINE_NIGHTS.every((coverageRotationId) => {
+    const removed = cellCredit(cell, coverageRotationId);
+    if (removed <= 0) return true;
+
+    const added = coverageRotationId === rotationId ? 1 : 0;
+    return rotationCreditsByBlock(state, block.id, coverageRotationId) - removed + added > 0.001;
+  });
+}
+
+function canReplaceWithPgy3PriorityRotation(
+  state: AppState,
+  resident: Resident,
+  block: Block,
+  rotationId: MedicineNightsRotation
+) {
+  const cell = state.assignments[resident.id]?.[block.id];
+  if (!cell || cellContainsPto(cell)) return false;
+
+  const additionalCredit = 1 - cellCredit(cell, rotationId);
+  if (
+    additionalCredit > 0.001 &&
+    (!capacityAllows(state, block, rotationId, additionalCredit) || !residentRotationCapAllows(state, resident, rotationId, additionalCredit))
+  ) {
+    return false;
+  }
+
+  for (const [existingRotationId, credit] of rotationCreditsInCell(state, resident, block)) {
+    if (existingRotationId === rotationId) continue;
+    if (!canRemoveRotationCredit(state, block, existingRotationId, credit)) return false;
+  }
+
+  return preservesMedicineNightsCoverageAfterReplacement(state, resident, block, rotationId);
+}
+
+function canPlacePgy3PriorityFull(
+  state: AppState,
+  resident: Resident,
+  block: Block,
+  rotationId: MedicineNightsRotation,
+  allowReplacement: boolean
+) {
+  const cell = state.assignments[resident.id]?.[block.id];
+  if (hasFullBlockRotation(cell, rotationId)) return true;
+  if (!cell || cellContainsPto(cell)) return false;
+
+  if (isEmptyCell(cell)) {
+    if (allowReplacement) return capacityAllows(state, block, rotationId, 1) && residentRotationCapAllows(state, resident, rotationId, 1);
+    return canPlaceFull(state, resident, block, rotationId);
+  }
+
+  return allowReplacement && canReplaceWithPgy3PriorityRotation(state, resident, block, rotationId);
+}
+
+function pgy3PriorityBlockScore(
+  state: AppState,
+  resident: Resident,
+  block: Block,
+  rotationId: MedicineNightsRotation,
+  allowReplacement: boolean
+) {
+  const cell = state.assignments[resident.id]?.[block.id];
+  let score = medicineNightsBlockPreferenceScore(state, resident, block, rotationId);
+
+  if (allowReplacement && hasAdjacentMedicineNights(state, resident, block)) {
+    score += 30;
+  }
+
+  if (!cell || isEmptyCell(cell)) return score;
+  if (hasAnyRotation(cell, rotationId)) return score - 20;
+  if (MEDICINE_NIGHTS.some((candidate) => hasAnyRotation(cell, candidate))) return score + 200;
+  return score + 100;
+}
+
+function placePgy3PriorityFull(
+  state: AppState,
+  resident: Resident,
+  block: Block,
+  rotationId: MedicineNightsRotation,
+  allowReplacement: boolean
+) {
+  if (!canPlacePgy3PriorityFull(state, resident, block, rotationId, allowReplacement)) return false;
+  state.assignments[resident.id][block.id] = fullRotationCell(rotationId);
+  return true;
+}
+
+function placePgy3PriorityUntilCredit(
+  state: AppState,
+  resident: Resident,
+  rotationId: MedicineNightsRotation,
+  rng: Rng,
+  allowReplacement: boolean
+) {
+  const candidateBlocks = blocksBefore(state, "10A");
+  const targetCredit = targetPgy3MedicineNightsCredit(state, rotationId);
+  let currentCredit = rotationCreditForResident(state, resident, rotationId, candidateBlocks);
+  if (currentCredit >= targetCredit) return true;
+
+  const remainingBlocks = shuffled(candidateBlocks, rng);
+
+  while (currentCredit < targetCredit && remainingBlocks.length > 0) {
+    const candidates = remainingBlocks
+      .filter((block) => canPlacePgy3PriorityFull(state, resident, block, rotationId, allowReplacement))
+      .map((block, index) => ({
+        block,
+        index,
+        score: pgy3PriorityBlockScore(state, resident, block, rotationId, allowReplacement)
+      }))
+      .sort((first, second) => first.score - second.score || first.index - second.index);
+
+    const next = candidates[0]?.block;
+    if (!next) break;
+
+    remainingBlocks.splice(
+      remainingBlocks.findIndex((candidate) => candidate.id === next.id),
+      1
+    );
+
+    const beforeCredit = cellCredit(state.assignments[resident.id]?.[next.id], rotationId);
+    if (placePgy3PriorityFull(state, resident, next, rotationId, allowReplacement)) {
+      currentCredit += cellCredit(state.assignments[resident.id]?.[next.id], rotationId) - beforeCredit;
+    }
+  }
+
+  return currentCredit + 0.001 >= targetCredit;
+}
+
+function placePgy3PriorityMedicineNightsBefore10A(state: AppState, rng: Rng, allowReplacement: boolean) {
+  const pgy3s = shuffled(state.residents.filter((resident) => resident.pgyLevel === 3), rng);
+
+  for (const resident of pgy3s) {
+    for (const rotationId of MEDICINE_NIGHTS) {
+      placePgy3PriorityUntilCredit(state, resident, rotationId, rng, allowReplacement);
+    }
+  }
+}
+
 function placePgy2Pocus(state: AppState, resident: Resident, rng: Rng) {
   const icuBlock = firstRotationBlock(state, resident, "icu");
   const followingBlock = icuBlock ? nextBlock(state, icuBlock) : undefined;
@@ -533,13 +757,12 @@ function placeResidentRequirements(state: AppState, rng: Rng) {
   const pgy3s = shuffled(state.residents.filter((resident) => resident.pgyLevel === 3), rng);
   const allResidents = shuffled(state.residents, rng);
 
-  placeInitialPgy2Pairs(state, rng);
-
   for (const resident of pgy2s) {
     placePgy2IcuAndPocus(state, resident, rng);
   }
 
   placeCoverage(state, rng);
+  placeCoverage(state, rng, true);
 
   const before10A = blocksBefore(state, "10A");
   for (const resident of pgy3s) {
@@ -617,19 +840,27 @@ function topOffRemainingCounts(state: AppState, rng: Rng) {
   }
 }
 
-function placeCoverage(state: AppState, rng: Rng) {
-  for (const block of orderedBlocks(state)) {
+function placeCoverage(state: AppState, rng: Rng, allowResidentRuleOverride = false) {
+  for (const block of coverageBlocks(state)) {
     const hasMedicine = state.residents.some((resident) => hasAnyRotation(state.assignments[resident.id]?.[block.id], "medicine"));
     if (!hasMedicine) {
-      for (const resident of coverageCandidates(state, block, "medicine", rng)) {
+      for (const resident of coverageCandidates(state, block, "medicine", rng, allowResidentRuleOverride)) {
         if (placeFull(state, resident, block, "medicine")) break;
+        if (allowResidentRuleOverride && canPlaceFullIgnoringMedicineNightsAdjacency(state, resident, block, "medicine")) {
+          state.assignments[resident.id][block.id] = fullRotationCell("medicine");
+          break;
+        }
       }
     }
 
     const hasNights = state.residents.some((resident) => hasAnyRotation(state.assignments[resident.id]?.[block.id], "nights"));
     if (!hasNights) {
-      for (const resident of coverageCandidates(state, block, "nights", rng)) {
+      for (const resident of coverageCandidates(state, block, "nights", rng, allowResidentRuleOverride)) {
         if (placeFull(state, resident, block, "nights")) break;
+        if (allowResidentRuleOverride && canPlaceFullIgnoringMedicineNightsAdjacency(state, resident, block, "nights")) {
+          state.assignments[resident.id][block.id] = fullRotationCell("nights");
+          break;
+        }
       }
     }
   }
@@ -642,39 +873,148 @@ function createCleanState(input: AppState): AppState {
   });
 }
 
-function scoreDiagnostics(diagnostics: Diagnostic[]) {
-  return diagnostics.reduce((score, diagnostic) => {
-    if (diagnostic.severity === "error") return score + 10000;
-    if (diagnostic.severity === "warning") return score + 10;
-    return score + 1;
-  }, 0);
+function isPgy3MedicineNightsBefore10AError(diagnostic: Diagnostic) {
+  return diagnostic.code === "pgy3.medicine.before-10a" || diagnostic.code === "pgy3.nights.before-10a";
+}
+
+function isSameMedicineNightsTransitionError(diagnostic: Diagnostic) {
+  return diagnostic.code === "resident.back-to-back-medicine" || diagnostic.code === "resident.back-to-back-nights";
+}
+
+function isNightsToMedicineTransitionError(diagnostic: Diagnostic) {
+  return diagnostic.code === "resident.nights-to-medicine";
+}
+
+function isMedicineToNightsTransitionError(diagnostic: Diagnostic) {
+  return diagnostic.code === "resident.medicine-to-nights";
+}
+
+function isMedicineNightsCapError(diagnostic: Diagnostic) {
+  return diagnostic.code === "resident.too-many-medicine" || diagnostic.code === "resident.too-many-nights";
+}
+
+function isNonOverridableError(diagnostic: Diagnostic) {
+  if (diagnostic.severity !== "error") return false;
+  return (
+    diagnostic.code.startsWith("pto.") ||
+    diagnostic.code.startsWith("coverage.") ||
+    diagnostic.code.startsWith("capacity.") ||
+    diagnostic.code.startsWith("setup.") ||
+    diagnostic.code === "resident.name-missing" ||
+    isMedicineNightsCapError(diagnostic)
+  );
+}
+
+function canAcceptResidentRuleOverrides(diagnostics: Diagnostic[]) {
+  return !diagnostics.some(
+    (diagnostic) =>
+      diagnostic.severity === "error" &&
+      (isPgy3MedicineNightsBefore10AError(diagnostic) || isNonOverridableError(diagnostic))
+  );
+}
+
+function withAcceptedResidentRuleOverrides(diagnostics: Diagnostic[]) {
+  if (!canAcceptResidentRuleOverrides(diagnostics)) return diagnostics;
+
+  return diagnostics.map((diagnostic) => {
+    if (diagnostic.severity !== "error") return diagnostic;
+    return { ...diagnostic, severity: "warning" as const };
+  });
+}
+
+function scoreDiagnostics(diagnostics: Diagnostic[]): DiagnosticScore {
+  return diagnostics.reduce<DiagnosticScore>(
+    (score, diagnostic) => {
+      if (diagnostic.severity === "error") {
+        if (isNonOverridableError(diagnostic)) {
+          score.guardrailErrors += 1;
+        } else if (isPgy3MedicineNightsBefore10AError(diagnostic)) {
+          score.pgy3Before10AErrors += 1;
+        } else if (isSameMedicineNightsTransitionError(diagnostic)) {
+          score.sameMedicineNightsTransitionErrors += 1;
+        } else if (isNightsToMedicineTransitionError(diagnostic)) {
+          score.nightsToMedicineTransitionErrors += 1;
+        } else if (isMedicineToNightsTransitionError(diagnostic)) {
+          score.medicineToNightsTransitionErrors += 1;
+        } else {
+          score.otherResidentErrors += 1;
+        }
+      } else if (diagnostic.severity === "warning") {
+        score.warnings += 1;
+      } else {
+        score.infos += 1;
+      }
+      return score;
+    },
+    {
+      guardrailErrors: 0,
+      pgy3Before10AErrors: 0,
+      sameMedicineNightsTransitionErrors: 0,
+      nightsToMedicineTransitionErrors: 0,
+      medicineToNightsTransitionErrors: 0,
+      otherResidentErrors: 0,
+      warnings: 0,
+      infos: 0
+    }
+  );
+}
+
+function compareDiagnosticScores(first: DiagnosticScore, second: DiagnosticScore) {
+  return (
+    first.guardrailErrors - second.guardrailErrors ||
+    first.pgy3Before10AErrors - second.pgy3Before10AErrors ||
+    first.sameMedicineNightsTransitionErrors - second.sameMedicineNightsTransitionErrors ||
+    first.nightsToMedicineTransitionErrors - second.nightsToMedicineTransitionErrors ||
+    first.medicineToNightsTransitionErrors - second.medicineToNightsTransitionErrors ||
+    first.otherResidentErrors - second.otherResidentErrors ||
+    first.warnings - second.warnings ||
+    first.infos - second.infos
+  );
+}
+
+function isCleanDiagnosticScore(score: DiagnosticScore) {
+  return (
+    score.guardrailErrors === 0 &&
+    score.pgy3Before10AErrors === 0 &&
+    score.sameMedicineNightsTransitionErrors === 0 &&
+    score.nightsToMedicineTransitionErrors === 0 &&
+    score.medicineToNightsTransitionErrors === 0 &&
+    score.otherResidentErrors === 0 &&
+    score.warnings === 0 &&
+    score.infos === 0
+  );
 }
 
 export function generateSchedule(input: AppState, attempts = 1000): GenerationResult {
   let bestState = createCleanState(input);
-  let bestDiagnostics = validateSchedule(bestState);
-  let bestScore = scoreDiagnostics(bestDiagnostics);
+  const initialDiagnostics = validateSchedule(bestState);
+  let bestDiagnostics = withAcceptedResidentRuleOverrides(initialDiagnostics);
+  let bestScore = scoreDiagnostics(initialDiagnostics);
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const rng = seededRng(9137 + attempt * 7919);
     const state = createCleanState(input);
 
     placeFixedAssignments(state, rng);
-    placeInitialPgy2Pairs(state, rng);
+    placePgy3PriorityMedicineNightsBefore10A(state, rng, false);
     placeResidentRequirements(state, rng);
     placeCoverage(state, rng);
+    placeCoverage(state, rng, true);
     topOffRemainingCounts(state, rng);
+    placePgy3PriorityMedicineNightsBefore10A(state, rng, true);
+    placeCoverage(state, rng, true);
 
-    const diagnostics = validateSchedule(state);
-    const score = scoreDiagnostics(diagnostics);
+    const rawDiagnostics = validateSchedule(state);
+    const diagnostics = withAcceptedResidentRuleOverrides(rawDiagnostics);
+    const score = scoreDiagnostics(rawDiagnostics);
 
-    if (score < bestScore) {
+    if (compareDiagnosticScores(score, bestScore) < 0) {
       bestState = state;
       bestDiagnostics = diagnostics;
       bestScore = score;
     }
 
-    if (score === 0) {
+    if (isCleanDiagnosticScore(score)) {
       return { state, diagnostics, success: true };
     }
   }
