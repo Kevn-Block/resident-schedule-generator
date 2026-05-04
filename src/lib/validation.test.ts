@@ -229,6 +229,39 @@ describe("validateSchedule", () => {
     expect(diagnostics.some((item) => item.code === "preference.early-med-nights-load")).toBe(false);
   });
 
+  it.each([
+    ["medicine", "resident.too-many-medicine"],
+    ["nights", "resident.too-many-nights"]
+  ] as const)("fails when a resident has more than 3 %s blocks", (rotationId, code) => {
+    const pgy2 = resident("pgy2", 2);
+    const state = stateWith([pgy2]);
+
+    for (const blockName of ["1A", "3A", "5A", "7A"]) {
+      state.assignments[pgy2.id][blockId(blockName)] = fullRotationCell(rotationId);
+    }
+
+    const diagnostics = validateSchedule(state);
+    const capDiagnostic = diagnostics.find((item) => item.code === code);
+
+    expect(capDiagnostic?.severity).toBe("error");
+  });
+
+  it.each([
+    ["medicine", "resident.too-many-medicine"],
+    ["nights", "resident.too-many-nights"]
+  ] as const)("allows exactly 3 %s blocks", (rotationId, code) => {
+    const pgy2 = resident("pgy2", 2);
+    const state = stateWith([pgy2]);
+
+    for (const blockName of ["1A", "3A", "5A"]) {
+      state.assignments[pgy2.id][blockId(blockName)] = fullRotationCell(rotationId);
+    }
+
+    const diagnostics = validateSchedule(state);
+
+    expect(diagnostics.some((item) => item.code === code)).toBe(false);
+  });
+
   it("counts labeled electives as Elective and displays the label", () => {
     const pgy2 = resident("pgy2", 2);
     const state = stateWith([pgy2]);
@@ -252,18 +285,18 @@ describe("validateSchedule", () => {
   });
 
   it.each([
-    ["medicine", "medicine"],
-    ["medicine", "nights"],
-    ["nights", "medicine"],
-    ["nights", "nights"]
-  ] as const)("fails when %s and %s are adjacent", (currentRotation, nextRotation) => {
+    ["medicine", "medicine", "resident.back-to-back-medicine"],
+    ["medicine", "nights", "resident.medicine-to-nights"],
+    ["nights", "medicine", "resident.nights-to-medicine"],
+    ["nights", "nights", "resident.back-to-back-nights"]
+  ] as const)("fails when %s and %s are adjacent", (currentRotation, nextRotation, code) => {
     const pgy2 = resident("pgy2", 2);
     const state = stateWith([pgy2]);
     state.assignments[pgy2.id][blockId("1A")] = fullRotationCell(currentRotation);
     state.assignments[pgy2.id][blockId("1B")] = fullRotationCell(nextRotation);
 
     const diagnostics = validateSchedule(state);
-    const backToBackDiagnostics = diagnostics.filter((item) => item.code === "resident.back-to-back-medicine-nights");
+    const backToBackDiagnostics = diagnostics.filter((item) => item.code === code);
 
     expect(backToBackDiagnostics).toHaveLength(1);
     expect(backToBackDiagnostics[0].severity).toBe("error");

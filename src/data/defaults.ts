@@ -108,6 +108,7 @@ export function createDemoState(): AppState {
     createResident("Jordan Malik", 2),
     createResident("Sam Rivera", 2),
     createResident("Riley Lawson", 2),
+    createResident("Jamie Ortiz", 2),
     createResident("Taylor Brooks", 3, true),
     createResident("Morgan Shah", 3),
     createResident("Casey Nguyen", 3),

@@ -25,6 +25,7 @@ const PGY3_CONSECUTIVE = [
 
 const MEDICINE_NIGHTS = ["medicine", "nights"] as const;
 const EARLY_MEDICINE_NIGHTS_CAP = 3;
+const MEDICINE_NIGHTS_TOTAL_CAP = 3;
 
 function pushDiagnostic(
   diagnostics: Diagnostic[],
@@ -204,14 +205,28 @@ function validateMedicineNightsTransitions(state: AppState, diagnostics: Diagnos
     const currentRotations = medicineNightsRotationNames(state, resident, current);
     const nextRotations = medicineNightsRotationNames(state, resident, next);
 
-    if (currentRotations.length > 0 && nextRotations.length > 0) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        "resident.back-to-back-medicine-nights",
-        `${resident.name} has back-to-back ${currentRotations.join("/")} and ${nextRotations.join("/")} in ${current.name} + ${next.name}; Medicine and Nights blocks cannot be adjacent.`,
-        { residentId: resident.id, blockId: current.id }
-      );
+    for (const currentRotation of currentRotations) {
+      for (const nextRotation of nextRotations) {
+        const currentRotationId = currentRotation === "Medicine" ? "medicine" : "nights";
+        const nextRotationId = nextRotation === "Medicine" ? "medicine" : "nights";
+        const sameRotation = currentRotationId === nextRotationId;
+        const code = sameRotation
+          ? `resident.back-to-back-${currentRotationId}`
+          : currentRotationId === "nights"
+            ? "resident.nights-to-medicine"
+            : "resident.medicine-to-nights";
+        const message = sameRotation
+          ? `${resident.name} has back-to-back ${currentRotation} blocks in ${current.name} + ${next.name}; consecutive ${currentRotation} blocks are not allowed.`
+          : `${resident.name} has ${currentRotation} followed by ${nextRotation} in ${current.name} + ${next.name}; mixed Medicine/Nights adjacency should only happen when unavoidable.`;
+
+        pushDiagnostic(
+          diagnostics,
+          "error",
+          code,
+          message,
+          { residentId: resident.id, blockId: current.id, rotationId: currentRotationId }
+        );
+      }
     }
   }
 }
@@ -252,6 +267,22 @@ function validateEarlyMedicineNightsPreferences(state: AppState, diagnostics: Di
       `${resident.name} should be paired with a PGY2 on Medicine or Nights at least once in Blocks 1A-4B.`,
       { residentId: resident.id }
     );
+  }
+}
+
+function validateMedicineNightsTotalCaps(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
+  for (const rotationId of MEDICINE_NIGHTS) {
+    const credit = rotationCreditForResident(state, resident, rotationId);
+    if (credit > MEDICINE_NIGHTS_TOTAL_CAP + 0.001) {
+      const label = rotationId === "medicine" ? "Medicine" : "Nights";
+      pushDiagnostic(
+        diagnostics,
+        "error",
+        `resident.too-many-${rotationId}`,
+        `${resident.name} has ${credit.toFixed(1)} ${label} block-equivalents but may have at most ${MEDICINE_NIGHTS_TOTAL_CAP}.`,
+        { residentId: resident.id, rotationId }
+      );
+    }
   }
 }
 
@@ -487,6 +518,7 @@ export function validateSchedule(state: AppState): Diagnostic[] {
       validatePgy3(state, diagnostics, resident);
     }
     validateEarlyMedicineNightsPreferences(state, diagnostics, resident);
+    validateMedicineNightsTotalCaps(state, diagnostics, resident);
     validateMedicineNightsTransitions(state, diagnostics, resident);
   }
 
