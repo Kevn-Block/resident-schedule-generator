@@ -20,7 +20,6 @@ const REQUIREMENTS: Record<Pgy1Type, { medicineRuns: number[]; nightsTotal: numb
 interface Candidate {
   blockIndexes: number[];
   key: string;
-  adjacencyPenalty: number;
 }
 
 interface ResidentPlan {
@@ -165,7 +164,7 @@ function generateMedicineCandidates(available: boolean[], runLengths: number[]):
       const blockIndexes = [...selected].sort((first, second) => first - second);
       if (!medicineChunkDistancesAllowed(blockIndexes)) return;
       const key = candidateKey(blockIndexes);
-      candidates.set(key, { blockIndexes, key, adjacencyPenalty: 0 });
+      candidates.set(key, { blockIndexes, key });
       return;
     }
 
@@ -185,7 +184,7 @@ function generateMedicineCandidates(available: boolean[], runLengths: number[]):
   return [...candidates.values()].sort((first, second) => first.key.localeCompare(second.key));
 }
 
-function generateCombinationCandidates(available: boolean[], requiredCount: number, adjacencyPenaltyForBlock: (blockIndex: number) => number) {
+function generateCombinationCandidates(available: boolean[], requiredCount: number) {
   const candidates: Candidate[] = [];
   const selected: number[] = [];
 
@@ -194,8 +193,7 @@ function generateCombinationCandidates(available: boolean[], requiredCount: numb
       const blockIndexes = [...selected];
       candidates.push({
         blockIndexes,
-        key: candidateKey(blockIndexes),
-        adjacencyPenalty: blockIndexes.reduce((sum, blockIndex) => sum + adjacencyPenaltyForBlock(blockIndex), 0)
+        key: candidateKey(blockIndexes)
       });
       return;
     }
@@ -236,7 +234,7 @@ function buildNightsPlans(state: AppState): ResidentPlan[] {
   const blocks = orderedBlocks(state);
 
   return state.residents.map((resident) => {
-    const nightsAvailable = availabilityForGeneratedRotation(state, resident, NIGHTS_ROTATION_ID);
+    const baseAvailable = availabilityForGeneratedRotation(state, resident, NIGHTS_ROTATION_ID);
     const nightsTotal = REQUIREMENTS[resident.pgy1Type].nightsTotal;
     const medicineBlocks = new Set(
       blocks
@@ -244,13 +242,16 @@ function buildNightsPlans(state: AppState): ResidentPlan[] {
         .filter(({ block }) => state.assignments[resident.id]?.[block.id]?.firstHalf.rotationId === MEDICINE_ROTATION_ID)
         .map(({ blockIndex }) => blockIndex)
     );
-    const adjacencyPenaltyForBlock = (blockIndex: number) => {
-      return (medicineBlocks.has(blockIndex - 1) ? 1 : 0) + (medicineBlocks.has(blockIndex + 1) ? 1 : 0);
-    };
+    const nightsAvailable = baseAvailable.map((isAvailable, blockIndex) => {
+      if (!isAvailable) return false;
+      if (medicineBlocks.has(blockIndex - 1)) return false;
+      if (medicineBlocks.has(blockIndex + 1)) return false;
+      return true;
+    });
 
     return {
       resident,
-      candidates: generateCombinationCandidates(nightsAvailable, nightsTotal, adjacencyPenaltyForBlock),
+      candidates: generateCombinationCandidates(nightsAvailable, nightsTotal),
       pgy1Type: resident.pgy1Type,
       requiredCount: nightsTotal
     };
@@ -313,8 +314,6 @@ function countAssignments(plans: ResidentPlan[], choices: number[], blockCount: 
 }
 
 function coverageCost(
-  plans: ResidentPlan[],
-  choices: number[],
   assignmentCounts: AssignmentCounts,
   bounds: CoverageBounds,
   blocks: Block[],
@@ -337,9 +336,7 @@ function coverageCost(
     }
   }
 
-  return choices.reduce((sum, candidateIndex, planIndex) => {
-    return sum + plans[planIndex].candidates[candidateIndex].adjacencyPenalty * 25;
-  }, cost);
+  return cost;
 }
 
 function solutionFromChoices(plans: ResidentPlan[], choices: number[]): CoverageSolution {
@@ -402,7 +399,7 @@ function findCoverageSolution(
   for (let restart = 0; restart < LOCAL_SEARCH_RESTARTS; restart += 1) {
     const choices = plans.map((plan) => Math.floor(random() * plan.candidates.length));
     let counts = countAssignments(plans, choices, blockCount);
-    let cost = coverageCost(plans, choices, counts, bounds, blocks, rotationId);
+    let cost = coverageCost(counts, bounds, blocks, rotationId);
 
     for (let iteration = 0; iteration < LOCAL_SEARCH_ITERATIONS; iteration += 1) {
       if (cost < HARD_COVERAGE_COST) {
@@ -416,7 +413,7 @@ function findCoverageSolution(
 
         perturbChoice(plans, choices, random);
         counts = countAssignments(plans, choices, blockCount);
-        cost = coverageCost(plans, choices, counts, bounds, blocks, rotationId);
+        cost = coverageCost(counts, bounds, blocks, rotationId);
         continue;
       }
 
@@ -427,7 +424,7 @@ function findCoverageSolution(
       for (let candidateIndex = 0; candidateIndex < plans[planIndex].candidates.length; candidateIndex += 1) {
         choices[planIndex] = candidateIndex;
         const candidateCounts = countAssignments(plans, choices, blockCount);
-        const candidateCost = coverageCost(plans, choices, candidateCounts, bounds, blocks, rotationId);
+        const candidateCost = coverageCost(candidateCounts, bounds, blocks, rotationId);
 
         if (candidateCost < bestCost || (candidateCost === bestCost && random() < 0.03)) {
           bestChoice = candidateIndex;
@@ -437,7 +434,7 @@ function findCoverageSolution(
 
       choices[planIndex] = bestChoice;
       counts = countAssignments(plans, choices, blockCount);
-      cost = coverageCost(plans, choices, counts, bounds, blocks, rotationId);
+      cost = coverageCost(counts, bounds, blocks, rotationId);
     }
   }
 

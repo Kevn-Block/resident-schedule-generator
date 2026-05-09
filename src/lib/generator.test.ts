@@ -155,6 +155,7 @@ describe("generateSchedule", () => {
     expect(result.success).toBe(true);
     expect(result.diagnostics.every((diagnostic) => diagnostic.severity !== "error")).toBe(true);
     expect(result.diagnostics.some((diagnostic) => diagnostic.code === "generation.no-solution")).toBe(false);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.code === "rule.days-nights-adjacency")).toBe(false);
 
     for (const block of orderedBlocks(result.state)) {
       const medicineCredit = result.state.residents.reduce(

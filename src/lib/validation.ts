@@ -329,7 +329,7 @@ function medicineNightsRotationsForResidentBlock(state: AppState, residentId: st
   };
 }
 
-function validateDaysNightsAdjacencyPreference(state: AppState, diagnostics: Diagnostic[]) {
+function validateDaysNightsAdjacency(state: AppState, diagnostics: Diagnostic[]) {
   const blocks = orderedBlocks(state);
 
   for (const resident of state.residents) {
@@ -344,9 +344,9 @@ function validateDaysNightsAdjacencyPreference(state: AppState, diagnostics: Dia
       if (daysToNights || nightsToDays) {
         pushDiagnostic(
           diagnostics,
-          "warning",
-          "preference.days-nights-adjacency",
-          `${resident.name} has adjacent Days and Nights in ${current.name} + ${next.name}; separate Days/Nights transitions when possible.`,
+          "error",
+          "rule.days-nights-adjacency",
+          `${resident.name} has adjacent Days and Nights in ${current.name} + ${next.name}; Days and Nights blocks must not be consecutive.`,
           { residentId: resident.id, blockId: current.id, rotationId: daysToNights ? "medicine" : "nights" }
         );
       }
@@ -367,7 +367,7 @@ export function validateSchedule(state: AppState): Diagnostic[] {
   validateBlockCoverage(state, diagnostics);
   validateFmOnlyLateBlocks(state, diagnostics);
   validateSpreadRules(state, diagnostics);
-  validateDaysNightsAdjacencyPreference(state, diagnostics);
+  validateDaysNightsAdjacency(state, diagnostics);
 
   for (const resident of state.residents) {
     if (!resident.name.trim()) {

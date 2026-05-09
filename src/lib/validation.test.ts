@@ -208,18 +208,19 @@ describe("validateSchedule", () => {
     expect(diagnostics.some((item) => item.code === "rule.nights-spacing")).toBe(false);
   });
 
-  it("warns but does not fail when FM has adjacent Days and Nights", () => {
+  it("errors when FM has adjacent Days and Nights", () => {
     const fm = resident("fm-intern", false, "fm");
     const state = stateWith([fm]);
     assignFullBlocks(state, fm.id, "medicine", ["1A", "1B", "3B", "4A", "6A"]);
     assignFullBlocks(state, fm.id, "nights", ["2A", "4B", "6B"]);
 
     const diagnostics = validateSchedule(state);
-    const warning = diagnostics.find((item) => item.code === "preference.days-nights-adjacency");
+    const adjacency = diagnostics.find((item) => item.code === "rule.days-nights-adjacency");
 
     expect(diagnostics.some((item) => item.code.startsWith("fm."))).toBe(false);
-    expect(diagnostics.some((item) => item.code.startsWith("rule."))).toBe(false);
-    expect(warning?.severity).toBe("warning");
+    expect(diagnostics.some((item) => item.code === "rule.nights-spacing")).toBe(false);
+    expect(diagnostics.some((item) => item.code === "rule.medicine-spacing")).toBe(false);
+    expect(adjacency?.severity).toBe("error");
   });
 
   it("rejects FM Medicine blocks that are not distributed as 2, 2, and 1", () => {
@@ -257,18 +258,19 @@ describe("validateSchedule", () => {
     expect(diagnostics.some((item) => item.code === "rule.nights-spacing")).toBe(false);
   });
 
-  it("warns but does not fail when TY has adjacent Days and Nights", () => {
+  it("errors when TY has adjacent Days and Nights", () => {
     const ty = resident("ty-intern", false, "ty");
     const state = stateWith([ty]);
     assignFullBlocks(state, ty.id, "medicine", ["1A", "1B", "3B", "4A", "6A", "6B"]);
     assignFullBlocks(state, ty.id, "nights", ["2A", "4B", "7A", "9A"]);
 
     const diagnostics = validateSchedule(state);
-    const warning = diagnostics.find((item) => item.code === "preference.days-nights-adjacency");
+    const adjacency = diagnostics.find((item) => item.code === "rule.days-nights-adjacency");
 
     expect(diagnostics.some((item) => item.code.startsWith("ty."))).toBe(false);
-    expect(diagnostics.some((item) => item.code.startsWith("rule."))).toBe(false);
-    expect(warning?.severity).toBe("warning");
+    expect(diagnostics.some((item) => item.code === "rule.nights-spacing")).toBe(false);
+    expect(diagnostics.some((item) => item.code === "rule.medicine-spacing")).toBe(false);
+    expect(adjacency?.severity).toBe("error");
   });
 
   it("rejects Nights that are too close or too far apart", () => {
