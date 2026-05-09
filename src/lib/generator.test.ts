@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultState, createResident, defaultRotations } from "../data/defaults";
 import type { AppState, Pgy1Type, PtoSelection, Resident } from "../types";
-import { generateSchedule } from "./generator";
+import { generateSchedule, residentInterleavingCost } from "./generator";
 import { cellCredit, describeCell, fullRotationCell, hasFullBlockRotation, isFullPto, orderedBlocks } from "./schedule";
 import { isSpreadDistanceAllowed } from "./rules";
 
@@ -259,5 +259,61 @@ describe("generateSchedule", () => {
     const result = generateSchedule(state);
 
     expect(describeCell(result.state.assignments[resident.id][block1A], result.state.rotations)).toBe("H1: PTO / H2: FM Clinic");
+  });
+
+  it("interleaves Medicine and Nights blocks for every resident", () => {
+    const state = importedPtoPatternState();
+
+    const result = generateSchedule(state);
+
+    expect(result.success).toBe(true);
+
+    for (const resident of result.state.residents) {
+      const medIdx = fullRotationBlockIndexes(result.state, resident, "medicine");
+      const nightIdx = fullRotationBlockIndexes(result.state, resident, "nights");
+      if (medIdx.length === 0 || nightIdx.length === 0) continue;
+
+      const medMin = Math.min(...medIdx);
+      const medMax = Math.max(...medIdx);
+      const nightMin = Math.min(...nightIdx);
+      const nightMax = Math.max(...nightIdx);
+
+      expect(nightMin, `${resident.name} has all Nights after all Medicine`).toBeLessThanOrEqual(medMax);
+      expect(nightMax, `${resident.name} has all Nights before all Medicine`).toBeGreaterThanOrEqual(medMin);
+    }
+  });
+});
+
+describe("residentInterleavingCost", () => {
+  const blockCount = 26;
+
+  it("is zero when medicine or nights is empty", () => {
+    expect(residentInterleavingCost([], [5, 10, 14], blockCount)).toBe(0);
+    expect(residentInterleavingCost([0, 1, 6, 7, 12], [], blockCount)).toBe(0);
+  });
+
+  it("penalizes nights entirely after medicine", () => {
+    const cost = residentInterleavingCost([0, 1, 6, 7, 12], [16, 20, 24], blockCount);
+    expect(cost).toBeGreaterThanOrEqual(500);
+  });
+
+  it("penalizes nights entirely before medicine", () => {
+    const cost = residentInterleavingCost([16, 17, 21, 22, 25], [0, 4, 8], blockCount);
+    expect(cost).toBeGreaterThanOrEqual(500);
+  });
+
+  it("returns zero when balanced and interleaved", () => {
+    const cost = residentInterleavingCost([0, 1, 12, 13, 24, 25], [4, 8, 17, 21], blockCount);
+    expect(cost).toBe(0);
+  });
+
+  it("does not penalize imbalance within the slack", () => {
+    const cost = residentInterleavingCost([0, 1, 12, 13, 18], [5, 9, 17], blockCount);
+    expect(cost).toBe(0);
+  });
+
+  it("penalizes mild imbalance only beyond the slack", () => {
+    const cost = residentInterleavingCost([0, 1, 5, 6, 11, 12], [8, 16, 20, 24], blockCount);
+    expect(cost).toBe(30 * 2);
   });
 });

@@ -61,6 +61,9 @@ const HARD_COVERAGE_COST = 1_000_000;
 const LOCAL_SEARCH_RESTARTS = 1_000;
 const LOCAL_SEARCH_ITERATIONS = 3_000;
 const SOLVE_DEADLINE_MS = 30_000;
+const INTERLEAVING_STRONG_PENALTY = 500;
+const INTERLEAVING_MILD_PENALTY = 30;
+const INTERLEAVING_IMBALANCE_SLACK = 2;
 
 function isGeneratedSegment(segment: ScheduleCell["firstHalf"]) {
   return segment.kind === "rotation" && Boolean(segment.rotationId && GENERATED_ROTATION_IDS.has(segment.rotationId));
@@ -391,6 +394,47 @@ function countAssignments(plans: ResidentPlan[], choices: number[], blockCount: 
   return { counts, fmCounts };
 }
 
+export function residentInterleavingCost(medIdx: number[], nightIdx: number[], blockCount: number) {
+  if (medIdx.length === 0 || nightIdx.length === 0) return 0;
+
+  let medMin = medIdx[0];
+  let medMax = medIdx[0];
+  for (const value of medIdx) {
+    if (value < medMin) medMin = value;
+    if (value > medMax) medMax = value;
+  }
+
+  let nightMin = nightIdx[0];
+  let nightMax = nightIdx[0];
+  for (const value of nightIdx) {
+    if (value < nightMin) nightMin = value;
+    if (value > nightMax) nightMax = value;
+  }
+
+  let cost = 0;
+  if (nightMin > medMax) cost += INTERLEAVING_STRONG_PENALTY;
+  if (nightMax < medMin) cost += INTERLEAVING_STRONG_PENALTY;
+
+  const mid = Math.floor(blockCount / 2);
+  let firstHalf = 0;
+  let secondHalf = 0;
+  for (const value of medIdx) {
+    if (value < mid) firstHalf += 1;
+    else secondHalf += 1;
+  }
+  for (const value of nightIdx) {
+    if (value < mid) firstHalf += 1;
+    else secondHalf += 1;
+  }
+
+  const imbalance = Math.abs(firstHalf - secondHalf);
+  if (imbalance > INTERLEAVING_IMBALANCE_SLACK) {
+    cost += INTERLEAVING_MILD_PENALTY * (imbalance - INTERLEAVING_IMBALANCE_SLACK);
+  }
+
+  return cost;
+}
+
 function coverageCost(
   assignmentCounts: AssignmentCounts,
   bounds: CoverageBounds,
@@ -468,7 +512,8 @@ function findCoverageSolution(
   rotationId: string,
   acceptSolution: (solution: CoverageSolution) => boolean = () => true,
   deadline: number = Date.now() + SOLVE_DEADLINE_MS,
-  trace?: SearchTrace
+  trace?: SearchTrace,
+  extraCost?: (choices: number[]) => number
 ): CoverageSolution | null {
   if (plans.some((plan) => plan.candidates.length === 0)) return null;
 
@@ -476,6 +521,12 @@ function findCoverageSolution(
   const random = createSeededRandom(rotationId === MEDICINE_ROTATION_ID ? 42 : 99);
   const rejectedSolutions = new Set<string>();
   let bestCostObserved = Number.POSITIVE_INFINITY;
+  const evaluate = (choices: number[]) => {
+    const counts = countAssignments(plans, choices, blockCount);
+    const coverage = coverageCost(counts, bounds, blocks, rotationId);
+    const extra = extraCost ? extraCost(choices) : 0;
+    return { counts, cost: coverage + extra, coverage, extra };
+  };
 
   const recordIfBest = (cost: number, counts: AssignmentCounts, choices: number[], restart: number, iteration: number) => {
     if (!trace?.onBestState || cost >= bestCostObserved) return;
@@ -497,8 +548,11 @@ function findCoverageSolution(
       return null;
     }
     const choices = plans.map((plan) => Math.floor(random() * plan.candidates.length));
-    let counts = countAssignments(plans, choices, blockCount);
-    let cost = coverageCost(counts, bounds, blocks, rotationId);
+    let evaluation = evaluate(choices);
+    let counts = evaluation.counts;
+    let cost = evaluation.cost;
+    let coverage = evaluation.coverage;
+    let extra = evaluation.extra;
     recordIfBest(cost, counts, choices, restart, 0);
 
     for (let iteration = 0; iteration < LOCAL_SEARCH_ITERATIONS; iteration += 1) {
@@ -506,7 +560,9 @@ function findCoverageSolution(
         trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
         return null;
       }
-      if (cost < HARD_COVERAGE_COST) {
+      const coverageFeasible = coverage < HARD_COVERAGE_COST;
+      const interleavingAcceptable = extra < INTERLEAVING_STRONG_PENALTY;
+      if (coverageFeasible && interleavingAcceptable) {
         const solutionKey = choices.map((choice, planIndex) => `${plans[planIndex].resident.id}:${plans[planIndex].candidates[choice].key}`).join("|");
 
         if (!rejectedSolutions.has(solutionKey)) {
@@ -516,8 +572,11 @@ function findCoverageSolution(
         }
 
         perturbChoice(plans, choices, random);
-        counts = countAssignments(plans, choices, blockCount);
-        cost = coverageCost(counts, bounds, blocks, rotationId);
+        evaluation = evaluate(choices);
+        counts = evaluation.counts;
+        cost = evaluation.cost;
+        coverage = evaluation.coverage;
+        extra = evaluation.extra;
         recordIfBest(cost, counts, choices, restart, iteration);
         continue;
       }
@@ -528,8 +587,7 @@ function findCoverageSolution(
 
       for (let candidateIndex = 0; candidateIndex < plans[planIndex].candidates.length; candidateIndex += 1) {
         choices[planIndex] = candidateIndex;
-        const candidateCounts = countAssignments(plans, choices, blockCount);
-        const candidateCost = coverageCost(candidateCounts, bounds, blocks, rotationId);
+        const candidateCost = evaluate(choices).cost;
 
         if (candidateCost < bestCost || (candidateCost === bestCost && random() < 0.03)) {
           bestChoice = candidateIndex;
@@ -538,8 +596,11 @@ function findCoverageSolution(
       }
 
       choices[planIndex] = bestChoice;
-      counts = countAssignments(plans, choices, blockCount);
-      cost = coverageCost(counts, bounds, blocks, rotationId);
+      evaluation = evaluate(choices);
+      counts = evaluation.counts;
+      cost = evaluation.cost;
+      coverage = evaluation.coverage;
+      extra = evaluation.extra;
       recordIfBest(cost, counts, choices, restart, iteration);
     }
   }
@@ -590,8 +651,31 @@ function solveSchedule(baseState: AppState, trace?: SearchTrace): AppState | nul
         }
         const nightBoundPairs = [flexibleNightsBounds].filter((bounds): bounds is CoverageBounds => Boolean(bounds));
 
+        const medicineIndexesByPlan = nightsPlans.map((plan) => {
+          const candidate = candidateMedicineSolution.assignments.get(plan.resident.id);
+          return candidate ? candidate.blockIndexes : [];
+        });
+        const nightsExtraCost = (choices: number[]) => {
+          let total = 0;
+          for (let planIndex = 0; planIndex < nightsPlans.length; planIndex += 1) {
+            const plan = nightsPlans[planIndex];
+            const nightsCandidate = plan.candidates[choices[planIndex]];
+            total += residentInterleavingCost(medicineIndexesByPlan[planIndex], nightsCandidate.blockIndexes, blockCount);
+          }
+          return total;
+        };
+
         for (const nightsBounds of nightBoundPairs) {
-          const nightsSolution = findCoverageSolution(nightsPlans, blocks, nightsBounds, NIGHTS_ROTATION_ID, () => true, deadline, trace);
+          const nightsSolution = findCoverageSolution(
+            nightsPlans,
+            blocks,
+            nightsBounds,
+            NIGHTS_ROTATION_ID,
+            () => true,
+            deadline,
+            trace,
+            nightsExtraCost
+          );
           if (!nightsSolution) continue;
 
           solvedState = assignGeneratedRotation(withMedicine, nightsSolution.assignments, NIGHTS_ROTATION_ID);
