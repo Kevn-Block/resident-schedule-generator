@@ -513,7 +513,8 @@ function findCoverageSolution(
   acceptSolution: (solution: CoverageSolution) => boolean = () => true,
   deadline: number = Date.now() + SOLVE_DEADLINE_MS,
   trace?: SearchTrace,
-  extraCost?: (choices: number[]) => number
+  extraCost?: (choices: number[]) => number,
+  optimizeExtraCost: boolean = false
 ): CoverageSolution | null {
   if (plans.some((plan) => plan.candidates.length === 0)) return null;
 
@@ -521,11 +522,29 @@ function findCoverageSolution(
   const random = createSeededRandom(rotationId === MEDICINE_ROTATION_ID ? 42 : 99);
   const rejectedSolutions = new Set<string>();
   let bestCostObserved = Number.POSITIVE_INFINITY;
+  let bestFeasible: { choices: number[]; cost: number } | null = null;
   const evaluate = (choices: number[]) => {
     const counts = countAssignments(plans, choices, blockCount);
     const coverage = coverageCost(counts, bounds, blocks, rotationId);
     const extra = extraCost ? extraCost(choices) : 0;
     return { counts, cost: coverage + extra, coverage, extra };
+  };
+
+  const recordFeasible = (choices: number[], coverage: number, cost: number) => {
+    if (coverage >= HARD_COVERAGE_COST) return;
+    if (!bestFeasible || cost < bestFeasible.cost) {
+      bestFeasible = { choices: choices.slice(), cost };
+    }
+  };
+
+  const fallbackOnExit = (): CoverageSolution | null => {
+    if (!optimizeExtraCost || !bestFeasible) return null;
+    const fallbackKey = bestFeasible.choices
+      .map((choice, planIndex) => `${plans[planIndex].resident.id}:${plans[planIndex].candidates[choice].key}`)
+      .join("|");
+    if (rejectedSolutions.has(fallbackKey)) return null;
+    const solution = solutionFromChoices(plans, bestFeasible.choices);
+    return acceptSolution(solution) ? solution : null;
   };
 
   const recordIfBest = (cost: number, counts: AssignmentCounts, choices: number[], restart: number, iteration: number) => {
@@ -545,7 +564,7 @@ function findCoverageSolution(
   for (let restart = 0; restart < LOCAL_SEARCH_RESTARTS; restart += 1) {
     if (Date.now() > deadline) {
       trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
-      return null;
+      return fallbackOnExit();
     }
     const choices = plans.map((plan) => Math.floor(random() * plan.candidates.length));
     let evaluation = evaluate(choices);
@@ -554,15 +573,16 @@ function findCoverageSolution(
     let coverage = evaluation.coverage;
     let extra = evaluation.extra;
     recordIfBest(cost, counts, choices, restart, 0);
+    recordFeasible(choices, coverage, cost);
 
     for (let iteration = 0; iteration < LOCAL_SEARCH_ITERATIONS; iteration += 1) {
       if ((iteration & 0xff) === 0 && Date.now() > deadline) {
         trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
-        return null;
+        return fallbackOnExit();
       }
       const coverageFeasible = coverage < HARD_COVERAGE_COST;
-      const interleavingAcceptable = extra < INTERLEAVING_STRONG_PENALTY;
-      if (coverageFeasible && interleavingAcceptable) {
+      const tryAccept = coverageFeasible && (!optimizeExtraCost || extra < INTERLEAVING_STRONG_PENALTY);
+      if (tryAccept) {
         const solutionKey = choices.map((choice, planIndex) => `${plans[planIndex].resident.id}:${plans[planIndex].candidates[choice].key}`).join("|");
 
         if (!rejectedSolutions.has(solutionKey)) {
@@ -578,6 +598,7 @@ function findCoverageSolution(
         coverage = evaluation.coverage;
         extra = evaluation.extra;
         recordIfBest(cost, counts, choices, restart, iteration);
+        recordFeasible(choices, coverage, cost);
         continue;
       }
 
@@ -602,11 +623,12 @@ function findCoverageSolution(
       coverage = evaluation.coverage;
       extra = evaluation.extra;
       recordIfBest(cost, counts, choices, restart, iteration);
+      recordFeasible(choices, coverage, cost);
     }
   }
 
   trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
-  return null;
+  return fallbackOnExit();
 }
 
 function totalRequired(plans: ResidentPlan[]) {
@@ -674,7 +696,8 @@ function solveSchedule(baseState: AppState, trace?: SearchTrace): AppState | nul
             () => true,
             deadline,
             trace,
-            nightsExtraCost
+            nightsExtraCost,
+            true
           );
           if (!nightsSolution) continue;
 
