@@ -1,5 +1,13 @@
 import type { AppState, Diagnostic } from "../types";
 import {
+  isFmOnlyLateBlock,
+  isSpreadDistanceAllowed,
+  MAX_SPREAD_DISTANCE,
+  MEDICINE_ROTATION_ID,
+  MIN_SPREAD_DISTANCE,
+  NIGHTS_ROTATION_ID
+} from "./rules";
+import {
   assignmentFor,
   cellContainsPto,
   cellCredit,
@@ -88,20 +96,22 @@ function rotationCreditForResident(state: AppState, residentId: string, rotation
 }
 
 function fullBlockRunsForResident(state: AppState, residentId: string, rotationId: string) {
-  const runs: Array<{ blocks: string[]; length: number }> = [];
+  const runs: Array<{ blocks: string[]; length: number; startIndex: number; endIndex: number }> = [];
   let current: string[] = [];
+  let startIndex = 0;
 
-  for (const block of orderedBlocks(state)) {
+  for (const [blockIndex, block] of orderedBlocks(state).entries()) {
     if (hasFullBlockRotation(state.assignments[residentId]?.[block.id], rotationId)) {
+      if (current.length === 0) startIndex = blockIndex;
       current.push(block.name);
     } else if (current.length > 0) {
-      runs.push({ blocks: current, length: current.length });
+      runs.push({ blocks: current, length: current.length, startIndex, endIndex: blockIndex - 1 });
       current = [];
     }
   }
 
   if (current.length > 0) {
-    runs.push({ blocks: current, length: current.length });
+    runs.push({ blocks: current, length: current.length, startIndex, endIndex: orderedBlocks(state).length - 1 });
   }
 
   return runs;
@@ -209,7 +219,7 @@ function validateBlockCoverage(state: AppState, diagnostics: Diagnostic[]) {
         );
       }
 
-      if (fmCredit - 0.001 > 1) {
+      if (!isFmOnlyLateBlock(block, rule.rotationId) && fmCredit - 0.001 > 1) {
         pushDiagnostic(
           diagnostics,
           "warning",
@@ -232,6 +242,81 @@ function validateBlockCoverage(state: AppState, diagnostics: Diagnostic[]) {
       if (Math.abs(credit - rule.min) <= 0.001) {
         earlierAtMinimum = true;
       }
+    }
+  }
+}
+
+function validateFmOnlyLateBlocks(state: AppState, diagnostics: Diagnostic[]) {
+  const restrictedRotationIds = ["medicine", "nights"] as const;
+
+  for (const resident of state.residents) {
+    if (resident.pgy1Type === "fm") continue;
+
+    for (const block of orderedBlocks(state)) {
+      for (const rotationId of restrictedRotationIds) {
+        if (!isFmOnlyLateBlock(block, rotationId)) continue;
+
+        const credit = cellCredit(state.assignments[resident.id]?.[block.id], rotationId);
+        if (credit <= 0.001) continue;
+
+        const rotation = rotationById(state.rotations, rotationId);
+        pushDiagnostic(
+          diagnostics,
+          "error",
+          `rule.fm-only-${rotationId}`,
+          `${block.name} ${rotation?.name ?? rotationId} is FM-only; ${resident.name} is ${resident.pgy1Type.toUpperCase()} and cannot be assigned there.`,
+          { residentId: resident.id, blockId: block.id, rotationId }
+        );
+      }
+    }
+  }
+}
+
+function rotationBlockIndexesForResident(state: AppState, residentId: string, rotationId: string) {
+  return orderedBlocks(state)
+    .map((block, blockIndex) => ({ block, blockIndex }))
+    .filter(({ block }) => cellCredit(state.assignments[residentId]?.[block.id], rotationId) > 0)
+    .map(({ block, blockIndex }) => ({ block, blockIndex }));
+}
+
+function validateSpreadRules(state: AppState, diagnostics: Diagnostic[]) {
+  const blocks = orderedBlocks(state);
+
+  for (const resident of state.residents) {
+    const nightBlocks = rotationBlockIndexesForResident(state, resident.id, NIGHTS_ROTATION_ID);
+
+    for (let index = 0; index < nightBlocks.length - 1; index += 1) {
+      const current = nightBlocks[index];
+      const next = nightBlocks[index + 1];
+      const distance = next.blockIndex - current.blockIndex;
+
+      if (isSpreadDistanceAllowed(distance)) continue;
+
+      pushDiagnostic(
+        diagnostics,
+        "error",
+        "rule.nights-spacing",
+        `${resident.name} has Nights in ${current.block.name} and ${next.block.name}, which are ${distance} block positions apart; Nights must be ${MIN_SPREAD_DISTANCE} to ${MAX_SPREAD_DISTANCE} block positions apart.`,
+        { residentId: resident.id, blockId: current.block.id, rotationId: NIGHTS_ROTATION_ID }
+      );
+    }
+
+    const medicineRuns = fullBlockRunsForResident(state, resident.id, MEDICINE_ROTATION_ID);
+
+    for (let index = 0; index < medicineRuns.length - 1; index += 1) {
+      const current = medicineRuns[index];
+      const next = medicineRuns[index + 1];
+      const distance = next.startIndex - current.endIndex;
+
+      if (isSpreadDistanceAllowed(distance)) continue;
+
+      pushDiagnostic(
+        diagnostics,
+        "error",
+        "rule.medicine-spacing",
+        `${resident.name} has Medicine chunks ${current.blocks.join("+")} and ${next.blocks.join("+")}, which are ${distance} block positions apart; Medicine chunks must be ${MIN_SPREAD_DISTANCE} to ${MAX_SPREAD_DISTANCE} block positions apart.`,
+        { residentId: resident.id, blockId: blocks[current.startIndex].id, rotationId: MEDICINE_ROTATION_ID }
+      );
     }
   }
 }
@@ -280,6 +365,8 @@ export function validateSchedule(state: AppState): Diagnostic[] {
   validateCapacity(state, diagnostics);
   validateResidentTypeRequirements(state, diagnostics);
   validateBlockCoverage(state, diagnostics);
+  validateFmOnlyLateBlocks(state, diagnostics);
+  validateSpreadRules(state, diagnostics);
   validateDaysNightsAdjacencyPreference(state, diagnostics);
 
   for (const resident of state.residents) {

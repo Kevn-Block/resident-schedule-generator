@@ -123,6 +123,53 @@ describe("validateSchedule", () => {
     expect(diagnostics.find((item) => item.code === "preference.fm-nights-balance")?.severity).toBe("warning");
   });
 
+  it("rejects non-FM residents on FM-only late Medicine and Nights blocks", () => {
+    const residents = [resident("ty-medicine", false, "ty"), resident("ty-nights", false, "ty")];
+    const state = stateWith(residents);
+    assignFullBlocks(state, residents[0].id, "medicine", ["13A", "13B"]);
+    assignFullBlocks(state, residents[1].id, "nights", ["13B"]);
+
+    const diagnostics = validateSchedule(state);
+
+    expect(
+      diagnostics.some((item) => item.code === "rule.fm-only-medicine" && item.blockId === blockId("13A"))
+    ).toBe(true);
+    expect(
+      diagnostics.some((item) => item.code === "rule.fm-only-medicine" && item.blockId === blockId("13B"))
+    ).toBe(true);
+    expect(
+      diagnostics.some((item) => item.code === "rule.fm-only-nights" && item.blockId === blockId("13B"))
+    ).toBe(true);
+  });
+
+  it("allows FM residents on FM-only late blocks without FM-balance warnings", () => {
+    const residents = [
+      resident("fm-medicine-1", false, "fm"),
+      resident("fm-medicine-2", false, "fm"),
+      resident("fm-nights-1", false, "fm"),
+      resident("fm-nights-2", false, "fm")
+    ];
+    const state = stateWith(residents);
+    assignFullBlocks(state, residents[0].id, "medicine", ["13A", "13B"]);
+    assignFullBlocks(state, residents[1].id, "medicine", ["13A", "13B"]);
+    assignFullBlocks(state, residents[2].id, "nights", ["13B"]);
+    assignFullBlocks(state, residents[3].id, "nights", ["13B"]);
+
+    const diagnostics = validateSchedule(state);
+
+    expect(diagnostics.some((item) => item.code.startsWith("rule.fm-only"))).toBe(false);
+    expect(
+      diagnostics.some(
+        (item) =>
+          item.code === "preference.fm-days-balance" &&
+          (item.blockId === blockId("13A") || item.blockId === blockId("13B"))
+      )
+    ).toBe(false);
+    expect(
+      diagnostics.some((item) => item.code === "preference.fm-nights-balance" && item.blockId === blockId("13B"))
+    ).toBe(false);
+  });
+
   it("warns when extra Days or Nights coverage appears after an earlier block is at minimum", () => {
     const residents = Array.from({ length: 7 }, (_, index) => resident(`intern-${index + 1}`));
     const state = stateWith(residents);
@@ -151,24 +198,27 @@ describe("validateSchedule", () => {
   it("accepts FM Medicine as two 2-block chunks plus one single block with 3 Nights blocks", () => {
     const fm = resident("fm-intern", false, "fm");
     const state = stateWith([fm]);
-    assignFullBlocks(state, fm.id, "medicine", ["1A", "1B", "3A", "3B", "5A"]);
-    assignFullBlocks(state, fm.id, "nights", ["6A", "7A", "8A"]);
+    assignFullBlocks(state, fm.id, "medicine", ["1A", "1B", "3B", "4A", "6A"]);
+    assignFullBlocks(state, fm.id, "nights", ["2A", "4B", "7A"]);
 
     const diagnostics = validateSchedule(state);
 
     expect(diagnostics.some((item) => item.code.startsWith("fm."))).toBe(false);
+    expect(diagnostics.some((item) => item.code === "rule.medicine-spacing")).toBe(false);
+    expect(diagnostics.some((item) => item.code === "rule.nights-spacing")).toBe(false);
   });
 
   it("warns but does not fail when FM has adjacent Days and Nights", () => {
     const fm = resident("fm-intern", false, "fm");
     const state = stateWith([fm]);
-    assignFullBlocks(state, fm.id, "medicine", ["1A", "1B", "3A", "3B", "5A"]);
-    assignFullBlocks(state, fm.id, "nights", ["5B", "7A", "8A"]);
+    assignFullBlocks(state, fm.id, "medicine", ["1A", "1B", "3B", "4A", "6A"]);
+    assignFullBlocks(state, fm.id, "nights", ["2A", "4B", "6B"]);
 
     const diagnostics = validateSchedule(state);
     const warning = diagnostics.find((item) => item.code === "preference.days-nights-adjacency");
 
     expect(diagnostics.some((item) => item.code.startsWith("fm."))).toBe(false);
+    expect(diagnostics.some((item) => item.code.startsWith("rule."))).toBe(false);
     expect(warning?.severity).toBe("warning");
   });
 
@@ -197,25 +247,56 @@ describe("validateSchedule", () => {
   it("accepts TY Medicine as three 2-block chunks with 4 Nights blocks", () => {
     const ty = resident("ty-intern", false, "ty");
     const state = stateWith([ty]);
-    assignFullBlocks(state, ty.id, "medicine", ["1A", "1B", "3A", "3B", "5A", "5B"]);
-    assignFullBlocks(state, ty.id, "nights", ["6A", "7A", "8A", "9A"]);
+    assignFullBlocks(state, ty.id, "medicine", ["1A", "1B", "3B", "4A", "6A", "6B"]);
+    assignFullBlocks(state, ty.id, "nights", ["2A", "4B", "7A", "9A"]);
 
     const diagnostics = validateSchedule(state);
 
     expect(diagnostics.some((item) => item.code.startsWith("ty."))).toBe(false);
+    expect(diagnostics.some((item) => item.code === "rule.medicine-spacing")).toBe(false);
+    expect(diagnostics.some((item) => item.code === "rule.nights-spacing")).toBe(false);
   });
 
   it("warns but does not fail when TY has adjacent Days and Nights", () => {
     const ty = resident("ty-intern", false, "ty");
     const state = stateWith([ty]);
-    assignFullBlocks(state, ty.id, "medicine", ["1A", "1B", "3A", "3B", "5A", "5B"]);
-    assignFullBlocks(state, ty.id, "nights", ["6A", "7A", "8A", "9A"]);
+    assignFullBlocks(state, ty.id, "medicine", ["1A", "1B", "3B", "4A", "6A", "6B"]);
+    assignFullBlocks(state, ty.id, "nights", ["2A", "4B", "7A", "9A"]);
 
     const diagnostics = validateSchedule(state);
     const warning = diagnostics.find((item) => item.code === "preference.days-nights-adjacency");
 
     expect(diagnostics.some((item) => item.code.startsWith("ty."))).toBe(false);
+    expect(diagnostics.some((item) => item.code.startsWith("rule."))).toBe(false);
     expect(warning?.severity).toBe("warning");
+  });
+
+  it("rejects Nights that are too close or too far apart", () => {
+    const tooClose = resident("too-close", false, "fm");
+    const tooFar = resident("too-far", false, "fm");
+    const state = stateWith([tooClose, tooFar]);
+    assignFullBlocks(state, tooClose.id, "medicine", ["1A", "1B", "3B", "4A", "6A"]);
+    assignFullBlocks(state, tooClose.id, "nights", ["2A", "3A", "7A"]);
+    assignFullBlocks(state, tooFar.id, "medicine", ["1A", "1B", "3B", "4A", "6A"]);
+    assignFullBlocks(state, tooFar.id, "nights", ["1A", "5A", "10A"]);
+
+    const diagnostics = validateSchedule(state);
+
+    expect(diagnostics.filter((item) => item.code === "rule.nights-spacing")).toHaveLength(2);
+  });
+
+  it("rejects Medicine chunks that are too close or too far apart", () => {
+    const tooClose = resident("too-close", false, "fm");
+    const tooFar = resident("too-far", false, "fm");
+    const state = stateWith([tooClose, tooFar]);
+    assignFullBlocks(state, tooClose.id, "medicine", ["1A", "1B", "3A", "3B", "6A"]);
+    assignFullBlocks(state, tooClose.id, "nights", ["2A", "4B", "7A"]);
+    assignFullBlocks(state, tooFar.id, "medicine", ["1A", "1B", "6A", "6B", "9B"]);
+    assignFullBlocks(state, tooFar.id, "nights", ["2A", "4B", "7A"]);
+
+    const diagnostics = validateSchedule(state);
+
+    expect(diagnostics.filter((item) => item.code === "rule.medicine-spacing")).toHaveLength(2);
   });
 
   it("rejects TY Medicine blocks that are not distributed as three 2-block chunks", () => {
