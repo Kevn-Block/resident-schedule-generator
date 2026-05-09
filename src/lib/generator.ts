@@ -17,12 +17,12 @@ const REQUIREMENTS: Record<Pgy1Type, { medicineRuns: number[]; nightsTotal: numb
   ty: { medicineRuns: [2, 2, 2], nightsTotal: 4 }
 };
 
-interface Candidate {
+export interface Candidate {
   blockIndexes: number[];
   key: string;
 }
 
-interface ResidentPlan {
+export interface ResidentPlan {
   resident: Resident;
   candidates: Candidate[];
   pgy1Type: Pgy1Type;
@@ -44,9 +44,23 @@ interface AssignmentCounts {
   fmCounts: number[];
 }
 
+export interface SearchTrace {
+  onBestState?: (info: {
+    rotationId: string;
+    cost: number;
+    counts: number[];
+    fmCounts: number[];
+    restart: number;
+    iteration: number;
+    choices: number[];
+  }) => void;
+  onSearchExhausted?: (info: { rotationId: string; bestCost: number }) => void;
+}
+
 const HARD_COVERAGE_COST = 1_000_000;
-const LOCAL_SEARCH_RESTARTS = 200;
-const LOCAL_SEARCH_ITERATIONS = 15_000;
+const LOCAL_SEARCH_RESTARTS = 1_000;
+const LOCAL_SEARCH_ITERATIONS = 3_000;
+const SOLVE_DEADLINE_MS = 30_000;
 
 function isGeneratedSegment(segment: ScheduleCell["firstHalf"]) {
   return segment.kind === "rotation" && Boolean(segment.rotationId && GENERATED_ROTATION_IDS.has(segment.rotationId));
@@ -58,7 +72,7 @@ function isLockedForGeneration(cell: ScheduleCell | undefined) {
   return segments.some((segment) => !isGeneratedSegment(segment) && segment.kind !== "empty");
 }
 
-function clearGeneratedAssignments(state: AppState): AppState {
+export function clearGeneratedAssignments(state: AppState): AppState {
   const assignments: AssignmentMatrix = {};
 
   for (const resident of state.residents) {
@@ -93,7 +107,7 @@ function availabilityForResident(state: AppState, residentId: string) {
   return orderedBlocks(state).map((block) => isEmptyCell(state.assignments[residentId]?.[block.id]));
 }
 
-function availabilityForGeneratedRotation(state: AppState, resident: Resident, rotationId: string) {
+export function availabilityForGeneratedRotation(state: AppState, resident: Resident, rotationId: string) {
   const blocks = orderedBlocks(state);
   const available = availabilityForResident(state, resident.id);
 
@@ -184,7 +198,7 @@ function generateMedicineCandidates(available: boolean[], runLengths: number[]):
   return [...candidates.values()].sort((first, second) => first.key.localeCompare(second.key));
 }
 
-function generateCombinationCandidates(available: boolean[], requiredCount: number) {
+export function generateCombinationCandidates(available: boolean[], requiredCount: number) {
   const candidates: Candidate[] = [];
   const selected: number[] = [];
 
@@ -216,10 +230,56 @@ function generateCombinationCandidates(available: boolean[], requiredCount: numb
   return candidates.filter((candidate) => assignmentDistancesAllowed(candidate.blockIndexes));
 }
 
-function buildMedicinePlans(state: AppState): ResidentPlan[] {
+export function nightsAvailableGivenMedicine(nightsBaseAvailable: boolean[], medicineBlockIndexes: number[]) {
+  const medicineSet = new Set(medicineBlockIndexes);
+  return nightsBaseAvailable.map((isAvailable, blockIndex) => {
+    if (!isAvailable) return false;
+    if (medicineSet.has(blockIndex)) return false;
+    if (medicineSet.has(blockIndex - 1)) return false;
+    if (medicineSet.has(blockIndex + 1)) return false;
+    return true;
+  });
+}
+
+export function hasFeasibleNightsCandidate(available: boolean[], requiredCount: number): boolean {
+  const selected: number[] = [];
+  let found = false;
+
+  const choose = (start: number): void => {
+    if (found) return;
+    if (selected.length === requiredCount) {
+      found = true;
+      return;
+    }
+    const remaining = requiredCount - selected.length;
+    for (let index = start; index <= available.length - remaining; index += 1) {
+      if (found) return;
+      if (!available[index]) continue;
+      if (selected.length > 0) {
+        const distance = index - selected[selected.length - 1];
+        if (distance < MIN_SPREAD_DISTANCE) continue;
+        if (distance > MAX_SPREAD_DISTANCE) break;
+      }
+      selected.push(index);
+      choose(index + 1);
+      selected.pop();
+    }
+  };
+
+  choose(0);
+  return found;
+}
+
+export function buildMedicinePlans(state: AppState): ResidentPlan[] {
   return state.residents.map((resident) => {
     const medicineRuns = REQUIREMENTS[resident.pgy1Type].medicineRuns;
-    const candidates = generateMedicineCandidates(availabilityForGeneratedRotation(state, resident, MEDICINE_ROTATION_ID), medicineRuns);
+    const medicineAvailable = availabilityForGeneratedRotation(state, resident, MEDICINE_ROTATION_ID);
+    const nightsBaseAvailable = availabilityForGeneratedRotation(state, resident, NIGHTS_ROTATION_ID);
+    const nightsTotal = REQUIREMENTS[resident.pgy1Type].nightsTotal;
+
+    const candidates = generateMedicineCandidates(medicineAvailable, medicineRuns).filter((medicineCandidate) =>
+      hasFeasibleNightsCandidate(nightsAvailableGivenMedicine(nightsBaseAvailable, medicineCandidate.blockIndexes), nightsTotal)
+    );
 
     return {
       resident,
@@ -230,24 +290,17 @@ function buildMedicinePlans(state: AppState): ResidentPlan[] {
   });
 }
 
-function buildNightsPlans(state: AppState): ResidentPlan[] {
+export function buildNightsPlans(state: AppState): ResidentPlan[] {
   const blocks = orderedBlocks(state);
 
   return state.residents.map((resident) => {
     const baseAvailable = availabilityForGeneratedRotation(state, resident, NIGHTS_ROTATION_ID);
     const nightsTotal = REQUIREMENTS[resident.pgy1Type].nightsTotal;
-    const medicineBlocks = new Set(
-      blocks
-        .map((block, blockIndex) => ({ block, blockIndex }))
-        .filter(({ block }) => state.assignments[resident.id]?.[block.id]?.firstHalf.rotationId === MEDICINE_ROTATION_ID)
-        .map(({ blockIndex }) => blockIndex)
-    );
-    const nightsAvailable = baseAvailable.map((isAvailable, blockIndex) => {
-      if (!isAvailable) return false;
-      if (medicineBlocks.has(blockIndex - 1)) return false;
-      if (medicineBlocks.has(blockIndex + 1)) return false;
-      return true;
-    });
+    const medicineBlockIndexes = blocks
+      .map((block, blockIndex) => ({ block, blockIndex }))
+      .filter(({ block }) => state.assignments[resident.id]?.[block.id]?.firstHalf.rotationId === MEDICINE_ROTATION_ID)
+      .map(({ blockIndex }) => blockIndex);
+    const nightsAvailable = nightsAvailableGivenMedicine(baseAvailable, medicineBlockIndexes);
 
     return {
       resident,
@@ -287,6 +340,31 @@ function flexibleCoverageBounds(totalRequired: number, blockCount: number, minPe
     maxCounts: Array.from({ length: blockCount }, () => maxPerBlock),
     preferredCounts: preferred.preferredCounts
   };
+}
+
+// Under the hard days/nights adjacency rule, FM-only late blocks (13A/13B
+// Medicine, 13B Nights) form a knife-edge: 5 FM residents must split exactly
+// 3-on-Medicine + 2-on-Nights with zero overlap. Capping max == min there
+// turns over-coverage into a HARD violation so the local search abandons
+// 4-FM-on-Medicine arrangements immediately. Safety guard: if the cap would
+// drop total capacity below the required credit, leave bounds untouched.
+function clampFmOnlyLateBlockBounds(
+  bounds: CoverageBounds,
+  blocks: Block[],
+  rotationId: string,
+  totalRequired: number
+) {
+  const newMax = bounds.maxCounts.slice();
+  const newPreferred = bounds.preferredCounts.slice();
+  for (let i = 0; i < blocks.length; i += 1) {
+    if (!isFmOnlyLateBlock(blocks[i], rotationId)) continue;
+    newMax[i] = bounds.minCounts[i];
+    newPreferred[i] = bounds.minCounts[i];
+  }
+  const totalMaxCapacity = newMax.reduce((sum, value) => sum + value, 0);
+  if (totalMaxCapacity < totalRequired) return;
+  bounds.maxCounts = newMax;
+  bounds.preferredCounts = newPreferred;
 }
 
 function createSeededRandom(seed: number) {
@@ -388,20 +466,46 @@ function findCoverageSolution(
   blocks: Block[],
   bounds: CoverageBounds,
   rotationId: string,
-  acceptSolution: (solution: CoverageSolution) => boolean = () => true
+  acceptSolution: (solution: CoverageSolution) => boolean = () => true,
+  deadline: number = Date.now() + SOLVE_DEADLINE_MS,
+  trace?: SearchTrace
 ): CoverageSolution | null {
   if (plans.some((plan) => plan.candidates.length === 0)) return null;
 
   const blockCount = blocks.length;
   const random = createSeededRandom(rotationId === MEDICINE_ROTATION_ID ? 42 : 99);
   const rejectedSolutions = new Set<string>();
+  let bestCostObserved = Number.POSITIVE_INFINITY;
+
+  const recordIfBest = (cost: number, counts: AssignmentCounts, choices: number[], restart: number, iteration: number) => {
+    if (!trace?.onBestState || cost >= bestCostObserved) return;
+    bestCostObserved = cost;
+    trace.onBestState({
+      rotationId,
+      cost,
+      counts: counts.counts.slice(),
+      fmCounts: counts.fmCounts.slice(),
+      restart,
+      iteration,
+      choices: choices.slice()
+    });
+  };
 
   for (let restart = 0; restart < LOCAL_SEARCH_RESTARTS; restart += 1) {
+    if (Date.now() > deadline) {
+      trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
+      return null;
+    }
     const choices = plans.map((plan) => Math.floor(random() * plan.candidates.length));
     let counts = countAssignments(plans, choices, blockCount);
     let cost = coverageCost(counts, bounds, blocks, rotationId);
+    recordIfBest(cost, counts, choices, restart, 0);
 
     for (let iteration = 0; iteration < LOCAL_SEARCH_ITERATIONS; iteration += 1) {
+      if ((iteration & 0xff) === 0 && Date.now() > deadline) {
+        trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
+        return null;
+      }
       if (cost < HARD_COVERAGE_COST) {
         const solutionKey = choices.map((choice, planIndex) => `${plans[planIndex].resident.id}:${plans[planIndex].candidates[choice].key}`).join("|");
 
@@ -414,6 +518,7 @@ function findCoverageSolution(
         perturbChoice(plans, choices, random);
         counts = countAssignments(plans, choices, blockCount);
         cost = coverageCost(counts, bounds, blocks, rotationId);
+        recordIfBest(cost, counts, choices, restart, iteration);
         continue;
       }
 
@@ -435,9 +540,11 @@ function findCoverageSolution(
       choices[planIndex] = bestChoice;
       counts = countAssignments(plans, choices, blockCount);
       cost = coverageCost(counts, bounds, blocks, rotationId);
+      recordIfBest(cost, counts, choices, restart, iteration);
     }
   }
 
+  trace?.onSearchExhausted?.({ rotationId, bestCost: bestCostObserved });
   return null;
 }
 
@@ -454,33 +561,48 @@ function generationFailureDiagnostic(): Diagnostic {
   };
 }
 
-function solveSchedule(baseState: AppState): AppState | null {
+function solveSchedule(baseState: AppState, trace?: SearchTrace): AppState | null {
   const blocks = orderedBlocks(baseState);
   const blockCount = blocks.length;
   const medicinePlans = buildMedicinePlans(baseState);
   const medicineTotal = totalRequired(medicinePlans);
   const flexibleMedicineBounds = flexibleCoverageBounds(medicineTotal, blockCount, 3, 4);
+  if (flexibleMedicineBounds) {
+    clampFmOnlyLateBlockBounds(flexibleMedicineBounds, blocks, MEDICINE_ROTATION_ID, medicineTotal);
+  }
   const boundPairs = [flexibleMedicineBounds].filter((bounds): bounds is CoverageBounds => Boolean(bounds));
+  const deadline = Date.now() + SOLVE_DEADLINE_MS;
 
   for (const medicineBounds of boundPairs) {
     let solvedState: AppState | null = null;
-    const medicineSolution = findCoverageSolution(medicinePlans, blocks, medicineBounds, MEDICINE_ROTATION_ID, (candidateMedicineSolution) => {
-      const withMedicine = assignGeneratedRotation(baseState, candidateMedicineSolution.assignments, MEDICINE_ROTATION_ID);
-      const nightsPlans = buildNightsPlans(withMedicine);
-      const nightsTotal = totalRequired(nightsPlans);
-      const flexibleNightsBounds = flexibleCoverageBounds(nightsTotal, blockCount, 2, 3);
-      const nightBoundPairs = [flexibleNightsBounds].filter((bounds): bounds is CoverageBounds => Boolean(bounds));
+    const medicineSolution = findCoverageSolution(
+      medicinePlans,
+      blocks,
+      medicineBounds,
+      MEDICINE_ROTATION_ID,
+      (candidateMedicineSolution) => {
+        const withMedicine = assignGeneratedRotation(baseState, candidateMedicineSolution.assignments, MEDICINE_ROTATION_ID);
+        const nightsPlans = buildNightsPlans(withMedicine);
+        const nightsTotal = totalRequired(nightsPlans);
+        const flexibleNightsBounds = flexibleCoverageBounds(nightsTotal, blockCount, 2, 3);
+        if (flexibleNightsBounds) {
+          clampFmOnlyLateBlockBounds(flexibleNightsBounds, blocks, NIGHTS_ROTATION_ID, nightsTotal);
+        }
+        const nightBoundPairs = [flexibleNightsBounds].filter((bounds): bounds is CoverageBounds => Boolean(bounds));
 
-      for (const nightsBounds of nightBoundPairs) {
-        const nightsSolution = findCoverageSolution(nightsPlans, blocks, nightsBounds, NIGHTS_ROTATION_ID);
-        if (!nightsSolution) continue;
+        for (const nightsBounds of nightBoundPairs) {
+          const nightsSolution = findCoverageSolution(nightsPlans, blocks, nightsBounds, NIGHTS_ROTATION_ID, () => true, deadline, trace);
+          if (!nightsSolution) continue;
 
-        solvedState = assignGeneratedRotation(withMedicine, nightsSolution.assignments, NIGHTS_ROTATION_ID);
-        return true;
-      }
+          solvedState = assignGeneratedRotation(withMedicine, nightsSolution.assignments, NIGHTS_ROTATION_ID);
+          return true;
+        }
 
-      return false;
-    });
+        return false;
+      },
+      deadline,
+      trace
+    );
 
     if (medicineSolution && solvedState) return solvedState;
   }
@@ -488,10 +610,10 @@ function solveSchedule(baseState: AppState): AppState | null {
   return null;
 }
 
-export function generateSchedule(input: AppState): GenerationResult {
+export function generateSchedule(input: AppState, trace?: SearchTrace): GenerationResult {
   const normalizedState = applyPtoToAssignments(ensureAssignmentShape(structuredClone(input)));
   const baseState = clearGeneratedAssignments(normalizedState);
-  const solvedState = solveSchedule(baseState);
+  const solvedState = solveSchedule(baseState, trace);
 
   if (!solvedState) {
     const diagnostics = [generationFailureDiagnostic(), ...validateSchedule(normalizedState)];
