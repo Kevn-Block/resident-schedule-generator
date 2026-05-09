@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { AppState, Diagnostic } from "../types";
+import { PGY1_TYPE_LABELS, type AppState, type Diagnostic } from "../types";
 import { blockLabel, describeCell, orderedBlocks } from "./schedule";
 
 export function exportScheduleXlsx(state: AppState, diagnostics: Diagnostic[]) {
@@ -7,8 +7,12 @@ export function exportScheduleXlsx(state: AppState, diagnostics: Diagnostic[]) {
   const scheduleRows = state.residents.map((resident) => {
     const row: Record<string, string> = {
       Resident: resident.name,
-      PGY: `PGY${resident.pgyLevel}`,
-      Chief: resident.isChief ? "Yes" : "No"
+      Type: `${PGY1_TYPE_LABELS[resident.pgy1Type]} PGY1`,
+      Chief: resident.isChief ? "Yes" : "No",
+      Matched: resident.pgy1Type === "ty" && resident.isMatched ? "Yes" : "No",
+      "Matched Details": resident.pgy1Type === "ty" && resident.isMatched ? resident.matchedDetails : "",
+      Unmatched: resident.pgy1Type === "ty" && resident.isUnmatched ? "Yes" : "No",
+      "Unmatched Details": resident.pgy1Type === "ty" && resident.isUnmatched ? resident.unmatchedDetails : ""
     };
 
     for (const block of blocks) {

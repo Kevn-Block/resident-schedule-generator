@@ -11,6 +11,9 @@ import type {
 
 export const emptySegment: AssignmentSegment = { kind: "empty" };
 export const ptoSegment: AssignmentSegment = { kind: "pto" };
+export const FM_CLINIC_ROTATION_ID = "family-medicine";
+
+type PtoAwareResident = Pick<Resident, "pgy1Type">;
 
 export function rotationSegment(rotationId: string, label = ""): AssignmentSegment {
   return rotationId === "elective" && label ? { kind: "rotation", rotationId, label } : { kind: "rotation", rotationId };
@@ -39,6 +42,7 @@ export function ptoCell(selection: PtoSelection): ScheduleCell {
   if (selection === "full") return fullPtoCell();
   if (selection === "first-half") return { firstHalf: ptoSegment, secondHalf: emptySegment };
   if (selection === "second-half") return { firstHalf: emptySegment, secondHalf: ptoSegment };
+  if (selection === "elective") return fullRotationCell("elective");
   return emptyCell();
 }
 
@@ -46,7 +50,12 @@ export function createAssignmentMatrix(residents: Resident[], blocks: Block[]): 
   return Object.fromEntries(
     residents.map((resident) => [
       resident.id,
-      Object.fromEntries(blocks.map((block) => [block.id, ptoCell(resident.ptoByBlock[block.id] ?? "none")]))
+      Object.fromEntries(
+        blocks.map((block) => [
+          block.id,
+          normalizeCellForPto(undefined, resident.ptoByBlock[block.id] ?? "none", resident)
+        ])
+      )
     ])
   );
 }
@@ -55,59 +64,105 @@ export function cloneState<T>(value: T): T {
   return structuredClone(value);
 }
 
-export function normalizeCellForPto(cell: ScheduleCell | undefined, pto: PtoSelection): ScheduleCell {
+function isHalfPtoSelection(selection: PtoSelection) {
+  return selection === "first-half" || selection === "second-half";
+}
+
+export function normalizePtoSelectionForResident(resident: PtoAwareResident | undefined, selection: PtoSelection): PtoSelection {
+  if (resident?.pgy1Type === "ty" && isHalfPtoSelection(selection)) return "full";
+  return selection;
+}
+
+function fmClinicSegmentForResident(resident: PtoAwareResident | undefined): AssignmentSegment | undefined {
+  return resident?.pgy1Type === "fm" ? rotationSegment(FM_CLINIC_ROTATION_ID) : undefined;
+}
+
+function normalizePtoByBlockForResident(resident: Resident, blocks: Block[]) {
+  return Object.fromEntries(
+    blocks.map((block) => [
+      block.id,
+      normalizePtoSelectionForResident(resident, resident.ptoByBlock[block.id] ?? "none")
+    ])
+  ) as Record<string, PtoSelection>;
+}
+
+export function normalizeCellForPto(
+  cell: ScheduleCell | undefined,
+  selection: PtoSelection,
+  resident?: PtoAwareResident
+): ScheduleCell {
+  const pto = normalizePtoSelectionForResident(resident, selection);
+
   if (pto === "full") {
     return fullPtoCell();
+  }
+
+  if (pto === "elective") {
+    return fullRotationCell("elective", getElectiveLabel(cell));
   }
 
   if (pto === "first-half") {
     return {
       firstHalf: ptoSegment,
-      secondHalf: cell?.secondHalf.kind === "pto" ? emptySegment : normalizeSegment(cell?.secondHalf)
+      secondHalf: fmClinicSegmentForResident(resident) ?? (cell?.secondHalf.kind === "pto" ? emptySegment : normalizeSegment(cell?.secondHalf))
     };
   }
 
   if (pto === "second-half") {
     return {
-      firstHalf: cell?.firstHalf.kind === "pto" ? emptySegment : normalizeSegment(cell?.firstHalf),
+      firstHalf: fmClinicSegmentForResident(resident) ?? (cell?.firstHalf.kind === "pto" ? emptySegment : normalizeSegment(cell?.firstHalf)),
       secondHalf: ptoSegment
     };
   }
 
+  if (cellContainsPto(cell)) {
+    return emptyCell();
+  }
+
   return {
-    firstHalf: cell?.firstHalf.kind === "pto" ? emptySegment : normalizeSegment(cell?.firstHalf),
-    secondHalf: cell?.secondHalf.kind === "pto" ? emptySegment : normalizeSegment(cell?.secondHalf)
+    firstHalf: normalizeSegment(cell?.firstHalf),
+    secondHalf: normalizeSegment(cell?.secondHalf)
   };
 }
 
 export function applyPtoToAssignments(state: AppState): AppState {
   const assignments: AssignmentMatrix = {};
+  const residents = state.residents.map((resident) => ({
+    ...resident,
+    ptoByBlock: normalizePtoByBlockForResident(resident, state.blocks)
+  }));
 
-  for (const resident of state.residents) {
+  for (const resident of residents) {
     assignments[resident.id] = {};
     const currentResidentAssignments = state.assignments[resident.id] ?? {};
     for (const block of state.blocks) {
       assignments[resident.id][block.id] = normalizeCellForPto(
         currentResidentAssignments[block.id],
-        resident.ptoByBlock[block.id] ?? "none"
+        resident.ptoByBlock[block.id] ?? "none",
+        resident
       );
     }
   }
 
-  return { ...state, assignments };
+  return { ...state, residents, assignments };
 }
 
 export function ensureAssignmentShape(state: AppState): AppState {
   const assignments: AssignmentMatrix = {};
-  for (const resident of state.residents) {
+  const residents = state.residents.map((resident) => ({
+    ...resident,
+    ptoByBlock: normalizePtoByBlockForResident(resident, state.blocks)
+  }));
+
+  for (const resident of residents) {
     assignments[resident.id] = {};
     for (const block of state.blocks) {
       const existing = state.assignments[resident.id]?.[block.id];
-      assignments[resident.id][block.id] = normalizeCellForPto(existing, resident.ptoByBlock[block.id] ?? "none");
+      assignments[resident.id][block.id] = normalizeCellForPto(existing, resident.ptoByBlock[block.id] ?? "none", resident);
     }
   }
 
-  return { ...state, assignments };
+  return { ...state, residents, assignments };
 }
 
 export function segmentCredit(segment: AssignmentSegment, rotationId: string): number {
@@ -196,26 +251,14 @@ export function assignmentFor(state: AppState, residentId: string, blockId: stri
 export function setFullAssignment(state: AppState, residentId: string, blockId: string, rotationId: string | ""): AppState {
   const next = cloneState(state);
   const resident = next.residents.find((item) => item.id === residentId);
-  const pto = resident?.ptoByBlock[blockId] ?? "none";
+  const pto = normalizePtoSelectionForResident(resident, resident?.ptoByBlock[blockId] ?? "none");
 
-  if (pto === "full") {
-    next.assignments[residentId][blockId] = fullPtoCell();
-    return next;
+  if (resident && resident.ptoByBlock[blockId] !== pto) {
+    resident.ptoByBlock[blockId] = pto;
   }
 
-  if (pto === "first-half") {
-    next.assignments[residentId][blockId] = {
-      firstHalf: ptoSegment,
-      secondHalf: rotationId ? rotationSegment(rotationId) : emptySegment
-    };
-    return next;
-  }
-
-  if (pto === "second-half") {
-    next.assignments[residentId][blockId] = {
-      firstHalf: rotationId ? rotationSegment(rotationId) : emptySegment,
-      secondHalf: ptoSegment
-    };
+  if (pto !== "none") {
+    next.assignments[residentId][blockId] = normalizeCellForPto(next.assignments[residentId]?.[blockId], pto, resident);
     return next;
   }
 

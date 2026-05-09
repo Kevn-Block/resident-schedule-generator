@@ -1,6 +1,11 @@
-export type PgyLevel = 2 | 3;
+export type PtoSelection = "none" | "full" | "first-half" | "second-half" | "elective";
 
-export type PtoSelection = "none" | "full" | "first-half" | "second-half";
+export type Pgy1Type = "ty" | "fm";
+
+export const PGY1_TYPE_LABELS: Record<Pgy1Type, string> = {
+  ty: "TY",
+  fm: "FM"
+};
 
 export type SegmentKind = "empty" | "rotation" | "pto";
 
@@ -19,8 +24,12 @@ export interface Block {
 export interface Resident {
   id: string;
   name: string;
-  pgyLevel: PgyLevel;
+  pgy1Type: Pgy1Type;
   isChief: boolean;
+  isMatched: boolean;
+  matchedDetails: string;
+  isUnmatched: boolean;
+  unmatchedDetails: string;
   ptoByBlock: Record<string, PtoSelection>;
 }
 
@@ -46,17 +55,6 @@ export interface ScheduleCell {
 
 export type AssignmentMatrix = Record<string, Record<string, ScheduleCell>>;
 
-export interface Requirements {
-  pgy2Medicine: number;
-  pgy2Nights: number;
-  pgy3Medicine: number;
-  pgy3Nights: number;
-  pgy2FamilyMedicine: number;
-  pgy3FamilyMedicine: number;
-  pgy2Elective: number;
-  pgy3Elective: number;
-}
-
 export interface Diagnostic {
   severity: DiagnosticSeverity;
   code: string;
@@ -70,7 +68,6 @@ export interface AppState {
   residents: Resident[];
   blocks: Block[];
   rotations: Rotation[];
-  requirements: Requirements;
   assignments: AssignmentMatrix;
 }
 
@@ -83,9 +80,15 @@ export interface GenerationResult {
 export const BUILT_IN_ROTATION_IDS = [
   "medicine",
   "nights",
+  "em",
+  "op-peds",
+  "psych",
+  "surgery",
+  "endo",
+  "uro",
+  "cardio",
   "family-medicine",
   "obgyn",
-  "op-peds",
   "ss-peds",
   "ent",
   "rheum",

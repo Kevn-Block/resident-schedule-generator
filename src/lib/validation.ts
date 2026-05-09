@@ -1,31 +1,13 @@
-import type { AppState, Block, Diagnostic, Resident } from "../types";
+import type { AppState, Diagnostic } from "../types";
 import {
   assignmentFor,
-  cellCredit,
   cellContainsPto,
-  hasAnyRotation,
+  cellCredit,
   hasFullBlockRotation,
   orderedBlocks,
   rotationCreditsByBlock,
   rotationById
 } from "./schedule";
-
-const PGY2_CONSECUTIVE = [
-  ["obgyn", "OBGYN"],
-  ["op-peds", "OP Peds"],
-  ["ss-peds", "SS Peds"]
-] as const;
-
-const PGY3_CONSECUTIVE = [
-  ["obgyn", "OBGYN"],
-  ["msk", "MSK"],
-  ["geri", "Geri"],
-  ["ped-ed", "Ped ED"]
-] as const;
-
-const MEDICINE_NIGHTS = ["medicine", "nights"] as const;
-const EARLY_MEDICINE_NIGHTS_CAP = 3;
-const MEDICINE_NIGHTS_TOTAL_CAP = 3;
 
 function pushDiagnostic(
   diagnostics: Diagnostic[],
@@ -37,102 +19,7 @@ function pushDiagnostic(
   diagnostics.push({ severity, code, message, ...context });
 }
 
-function blockByName(blocks: Block[], name: string): Block | undefined {
-  return blocks.find((block) => block.name.toLowerCase() === name.toLowerCase());
-}
-
-function rotationCreditForResident(state: AppState, resident: Resident, rotationId: string, predicate?: (block: Block) => boolean): number {
-  return orderedBlocks(state).reduce((sum, block) => {
-    if (predicate && !predicate(block)) return sum;
-    return sum + cellCredit(state.assignments[resident.id]?.[block.id], rotationId);
-  }, 0);
-}
-
-function firstRotationBlock(state: AppState, resident: Resident, rotationId: string): Block | undefined {
-  return orderedBlocks(state).find((block) => hasAnyRotation(state.assignments[resident.id]?.[block.id], rotationId));
-}
-
-function nextBlock(state: AppState, block: Block): Block | undefined {
-  return orderedBlocks(state).find((candidate) => candidate.order === block.order + 1);
-}
-
-function pairPhaseBlocks(state: AppState): Block[] {
-  const block4B = blockByName(state.blocks, "4B");
-  if (!block4B) return [];
-  return orderedBlocks(state).filter((block) => block.order <= block4B.order);
-}
-
-function earlyMedicineNightsCredit(state: AppState, resident: Resident): number {
-  return pairPhaseBlocks(state).reduce((sum, block) => {
-    return sum + cellCredit(state.assignments[resident.id]?.[block.id], "medicine") + cellCredit(state.assignments[resident.id]?.[block.id], "nights");
-  }, 0);
-}
-
-function hasPgy2PairOnBlock(state: AppState, block: Block, rotationId: (typeof MEDICINE_NIGHTS)[number]): boolean {
-  return state.residents.some(
-    (resident) => resident.pgyLevel === 2 && hasAnyRotation(state.assignments[resident.id]?.[block.id], rotationId)
-  );
-}
-
-function hasEarlyPgy2PairForPgy3(state: AppState, resident: Resident): boolean {
-  return pairPhaseBlocks(state).some((block) =>
-    MEDICINE_NIGHTS.some(
-      (rotationId) =>
-        hasAnyRotation(state.assignments[resident.id]?.[block.id], rotationId) && hasPgy2PairOnBlock(state, block, rotationId)
-    )
-  );
-}
-
-function consecutivePairs(state: AppState, resident: Resident, rotationId: string) {
-  const blocks = orderedBlocks(state);
-  const pairs: Array<{ first: Block; second: Block; sameNumber: boolean }> = [];
-
-  for (let index = 0; index < blocks.length - 1; index += 1) {
-    const first = blocks[index];
-    const second = blocks[index + 1];
-    if (
-      hasFullBlockRotation(state.assignments[resident.id]?.[first.id], rotationId) &&
-      hasFullBlockRotation(state.assignments[resident.id]?.[second.id], rotationId)
-    ) {
-      pairs.push({ first, second, sameNumber: first.number === second.number });
-    }
-  }
-
-  return pairs;
-}
-
-function validateConsecutiveRequirement(
-  state: AppState,
-  diagnostics: Diagnostic[],
-  resident: Resident,
-  rotationId: string,
-  rotationName: string
-) {
-  const pairs = consecutivePairs(state, resident, rotationId);
-  if (pairs.length === 0) {
-    pushDiagnostic(
-      diagnostics,
-      "error",
-      "resident.consecutive-missing",
-      `${resident.name} must complete 2 consecutive full blocks of ${rotationName}.`,
-      { residentId: resident.id, rotationId }
-    );
-    return;
-  }
-
-  if (!pairs.some((pair) => pair.sameNumber)) {
-    const firstPair = pairs[0];
-    pushDiagnostic(
-      diagnostics,
-      "warning",
-      "preference.cross-number-pair",
-      `${resident.name}'s ${rotationName} pair uses ${firstPair.first.name} + ${firstPair.second.name}; same-number A/B pairs are preferred.`,
-      { residentId: resident.id, rotationId, blockId: firstPair.first.id }
-    );
-  }
-}
-
-function validatePtoAndSplitRules(state: AppState, diagnostics: Diagnostic[]) {
+function validatePtoAndSplitGuardrails(state: AppState, diagnostics: Diagnostic[]) {
   for (const resident of state.residents) {
     for (const block of orderedBlocks(state)) {
       const cell = assignmentFor(state, resident.id, block.id);
@@ -170,122 +57,6 @@ function validatePtoAndSplitRules(state: AppState, diagnostics: Diagnostic[]) {
   }
 }
 
-function validateCoverage(state: AppState, diagnostics: Diagnostic[]) {
-  for (const block of orderedBlocks(state)) {
-    const hasMedicine = state.residents.some((resident) => hasAnyRotation(state.assignments[resident.id]?.[block.id], "medicine"));
-    const hasNights = state.residents.some((resident) => hasAnyRotation(state.assignments[resident.id]?.[block.id], "nights"));
-
-    if (!hasMedicine) {
-      pushDiagnostic(diagnostics, "error", "coverage.missing-days", `${block.name} needs at least one Medicine assignment.`, {
-        blockId: block.id,
-        rotationId: "medicine"
-      });
-    }
-
-    if (!hasNights) {
-      pushDiagnostic(diagnostics, "error", "coverage.missing-nights", `${block.name} needs at least one Nights assignment.`, {
-        blockId: block.id,
-        rotationId: "nights"
-      });
-    }
-  }
-}
-
-function medicineNightsRotationNames(state: AppState, resident: Resident, block: Block): string[] {
-  return MEDICINE_NIGHTS.filter((rotationId) => hasAnyRotation(state.assignments[resident.id]?.[block.id], rotationId)).map(
-    (rotationId) => (rotationId === "medicine" ? "Medicine" : "Nights")
-  );
-}
-
-function validateMedicineNightsTransitions(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
-  const blocks = orderedBlocks(state);
-  for (let index = 0; index < blocks.length - 1; index += 1) {
-    const current = blocks[index];
-    const next = blocks[index + 1];
-    const currentRotations = medicineNightsRotationNames(state, resident, current);
-    const nextRotations = medicineNightsRotationNames(state, resident, next);
-
-    for (const currentRotation of currentRotations) {
-      for (const nextRotation of nextRotations) {
-        const currentRotationId = currentRotation === "Medicine" ? "medicine" : "nights";
-        const nextRotationId = nextRotation === "Medicine" ? "medicine" : "nights";
-        const sameRotation = currentRotationId === nextRotationId;
-        const code = sameRotation
-          ? `resident.back-to-back-${currentRotationId}`
-          : currentRotationId === "nights"
-            ? "resident.nights-to-medicine"
-            : "resident.medicine-to-nights";
-        const message = sameRotation
-          ? `${resident.name} has back-to-back ${currentRotation} blocks in ${current.name} + ${next.name}; consecutive ${currentRotation} blocks are not allowed.`
-          : `${resident.name} has ${currentRotation} followed by ${nextRotation} in ${current.name} + ${next.name}; mixed Medicine/Nights adjacency should only happen when unavoidable.`;
-
-        pushDiagnostic(
-          diagnostics,
-          "error",
-          code,
-          message,
-          { residentId: resident.id, blockId: current.id, rotationId: currentRotationId }
-        );
-      }
-    }
-  }
-}
-
-function validatePocusAfterIcuPreference(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
-  const icuBlock = firstRotationBlock(state, resident, "icu");
-  if (!icuBlock || rotationCreditForResident(state, resident, "pocus") < 1) return;
-
-  const followingBlock = nextBlock(state, icuBlock);
-  if (followingBlock && hasFullBlockRotation(state.assignments[resident.id]?.[followingBlock.id], "pocus")) return;
-
-  pushDiagnostic(
-    diagnostics,
-    "warning",
-    "preference.pocus-after-icu",
-    `${resident.name} should have POCUS immediately after ICU when possible.`,
-    { residentId: resident.id, blockId: icuBlock.id, rotationId: "pocus" }
-  );
-}
-
-function validateEarlyMedicineNightsPreferences(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
-  const earlyCredit = earlyMedicineNightsCredit(state, resident);
-  if (earlyCredit > EARLY_MEDICINE_NIGHTS_CAP + 0.001) {
-    pushDiagnostic(
-      diagnostics,
-      "warning",
-      "preference.early-med-nights-load",
-      `${resident.name} has ${earlyCredit.toFixed(1)} Medicine/Nights block-equivalents in Blocks 1A-4B; at most ${EARLY_MEDICINE_NIGHTS_CAP} is preferred.`,
-      { residentId: resident.id }
-    );
-  }
-
-  if (resident.pgyLevel === 3 && pairPhaseBlocks(state).length > 0 && !hasEarlyPgy2PairForPgy3(state, resident)) {
-    pushDiagnostic(
-      diagnostics,
-      "warning",
-      "preference.pgy3-early-pairing",
-      `${resident.name} should be paired with a PGY2 on Medicine or Nights at least once in Blocks 1A-4B.`,
-      { residentId: resident.id }
-    );
-  }
-}
-
-function validateMedicineNightsTotalCaps(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
-  for (const rotationId of MEDICINE_NIGHTS) {
-    const credit = rotationCreditForResident(state, resident, rotationId);
-    if (credit > MEDICINE_NIGHTS_TOTAL_CAP + 0.001) {
-      const label = rotationId === "medicine" ? "Medicine" : "Nights";
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        `resident.too-many-${rotationId}`,
-        `${resident.name} has ${credit.toFixed(1)} ${label} block-equivalents but may have at most ${MEDICINE_NIGHTS_TOTAL_CAP}.`,
-        { residentId: resident.id, rotationId }
-      );
-    }
-  }
-}
-
 function validateCapacity(state: AppState, diagnostics: Diagnostic[]) {
   for (const block of orderedBlocks(state)) {
     for (const rotation of state.rotations) {
@@ -312,185 +83,188 @@ function validateCapacity(state: AppState, diagnostics: Diagnostic[]) {
   }
 }
 
-function validatePgy2(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
-  const block4B = blockByName(state.blocks, "4B");
-  const block6B = blockByName(state.blocks, "6B");
+function rotationCreditForResident(state: AppState, residentId: string, rotationId: string): number {
+  return orderedBlocks(state).reduce((sum, block) => sum + cellCredit(state.assignments[residentId]?.[block.id], rotationId), 0);
+}
 
-  if (block4B) {
-    const through4B = (block: Block) => block.order <= block4B.order;
-    const earlyMedicine = rotationCreditForResident(state, resident, "medicine", through4B);
-    const earlyNights = rotationCreditForResident(state, resident, "nights", through4B);
+function fullBlockRunsForResident(state: AppState, residentId: string, rotationId: string) {
+  const runs: Array<{ blocks: string[]; length: number }> = [];
+  let current: string[] = [];
 
-    if (earlyMedicine < 1) {
+  for (const block of orderedBlocks(state)) {
+    if (hasFullBlockRotation(state.assignments[residentId]?.[block.id], rotationId)) {
+      current.push(block.name);
+    } else if (current.length > 0) {
+      runs.push({ blocks: current, length: current.length });
+      current = [];
+    }
+  }
+
+  if (current.length > 0) {
+    runs.push({ blocks: current, length: current.length });
+  }
+
+  return runs;
+}
+
+function formatRuns(runs: Array<{ blocks: string[]; length: number }>) {
+  return runs.length ? runs.map((run) => `${run.length} (${run.blocks.join("+")})`).join(", ") : "none";
+}
+
+function validatePgy1TypeRequirements(
+  state: AppState,
+  diagnostics: Diagnostic[],
+  pgy1Type: "fm" | "ty",
+  label: string,
+  medicineTotal: number,
+  medicineDistribution: number[],
+  nightsTotal: number,
+  distributionDescription: string
+) {
+  const expectedDistribution = [...medicineDistribution].sort((first, second) => first - second).join(",");
+
+  for (const resident of state.residents.filter((item) => item.pgy1Type === pgy1Type)) {
+    const medicineCredit = rotationCreditForResident(state, resident.id, "medicine");
+    if (Math.abs(medicineCredit - medicineTotal) > 0.001) {
       pushDiagnostic(
         diagnostics,
         "error",
-        "pgy2.early-medicine",
-        `${resident.name} must complete at least one Medicine block by the end of Block 4B.`,
+        `${pgy1Type}.medicine.total`,
+        `${resident.name} is ${label} and must complete exactly ${medicineTotal} Medicine blocks; current total is ${medicineCredit.toFixed(1)}.`,
         { residentId: resident.id, rotationId: "medicine" }
       );
     }
 
-    if (earlyNights < 1) {
+    const medicineRuns = fullBlockRunsForResident(state, resident.id, "medicine");
+    const distribution = medicineRuns.map((run) => run.length).sort((first, second) => first - second);
+    if (distribution.join(",") !== expectedDistribution) {
       pushDiagnostic(
         diagnostics,
         "error",
-        "pgy2.early-nights",
-        `${resident.name} must complete at least one Nights block by the end of Block 4B.`,
+        `${pgy1Type}.medicine.distribution`,
+        `${resident.name} is ${label} and must complete Medicine as ${distributionDescription}; current chunks are ${formatRuns(medicineRuns)}.`,
+        { residentId: resident.id, rotationId: "medicine" }
+      );
+    }
+
+    const nightsCredit = rotationCreditForResident(state, resident.id, "nights");
+    if (Math.abs(nightsCredit - nightsTotal) > 0.001) {
+      pushDiagnostic(
+        diagnostics,
+        "error",
+        `${pgy1Type}.nights.total`,
+        `${resident.name} is ${label} and must complete exactly ${nightsTotal} Nights blocks; current total is ${nightsCredit.toFixed(1)}.`,
         { residentId: resident.id, rotationId: "nights" }
       );
     }
   }
-
-  for (const [rotationId, label, total] of [
-    ["medicine", "Medicine", state.requirements.pgy2Medicine],
-    ["nights", "Nights", state.requirements.pgy2Nights],
-    ["family-medicine", "Family Medicine", state.requirements.pgy2FamilyMedicine],
-    ["elective", "Elective", state.requirements.pgy2Elective]
-  ] as const) {
-    const credit = rotationCreditForResident(state, resident, rotationId);
-    if (credit + 0.001 < total) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        `pgy2.${rotationId}.total`,
-        `${resident.name} needs ${total} ${label} block-equivalent${total === 1 ? "" : "s"} and has ${credit.toFixed(1)}.`,
-        { residentId: resident.id, rotationId }
-      );
-    }
-  }
-
-  for (const [rotationId, label] of PGY2_CONSECUTIVE) {
-    validateConsecutiveRequirement(state, diagnostics, resident, rotationId, label);
-  }
-
-  for (const [rotationId, label] of [
-    ["ent", "ENT"],
-    ["rheum", "Rheum"],
-    ["icu", "ICU"],
-    ["pocus", "POCUS"]
-  ] as const) {
-    const credit = rotationCreditForResident(state, resident, rotationId);
-    if (credit < 1) {
-      pushDiagnostic(diagnostics, "error", `pgy2.${rotationId}.missing`, `${resident.name} needs 1 block of ${label}.`, {
-        residentId: resident.id,
-        rotationId
-      });
-    }
-  }
-
-  if (block6B) {
-    const lateIcuBlocks = orderedBlocks(state).filter(
-      (block) => block.order > block6B.order && hasAnyRotation(state.assignments[resident.id]?.[block.id], "icu")
-    );
-    for (const block of lateIcuBlocks) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        "pgy2.icu-window",
-        `${resident.name}'s ICU assignment in ${block.name} is outside the allowed 1A-6B window.`,
-        { residentId: resident.id, blockId: block.id, rotationId: "icu" }
-      );
-    }
-  }
-
-  for (const rotationId of ["medicine", "nights"]) {
-    const firstBlock = firstRotationBlock(state, resident, rotationId);
-    if (!firstBlock) continue;
-    const hasPgy3Pair = state.residents.some(
-      (candidate) =>
-        candidate.pgyLevel === 3 && hasAnyRotation(state.assignments[candidate.id]?.[firstBlock.id], rotationId)
-    );
-    if (!hasPgy3Pair) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        `pgy2.first-${rotationId}-pairing`,
-        `${resident.name}'s first ${rotationId === "medicine" ? "Medicine" : "Nights"} block (${firstBlock.name}) must be paired with a PGY3 on the same rotation.`,
-        { residentId: resident.id, blockId: firstBlock.id, rotationId }
-      );
-    }
-  }
-
-  validatePocusAfterIcuPreference(state, diagnostics, resident);
 }
 
-function validatePgy3(state: AppState, diagnostics: Diagnostic[], resident: Resident) {
-  const block10A = blockByName(state.blocks, "10A");
-  const before10A = block10A ? (block: Block) => block.order < block10A.order : undefined;
+function validateResidentTypeRequirements(state: AppState, diagnostics: Diagnostic[]) {
+  validatePgy1TypeRequirements(state, diagnostics, "fm", "FM", 5, [2, 2, 1], 3, "two 2-block chunks plus one single block");
+  validatePgy1TypeRequirements(state, diagnostics, "ty", "TY", 6, [2, 2, 2], 4, "three 2-block chunks");
+}
 
-  for (const [rotationId, label, total] of [
-    ["medicine", "Medicine", state.requirements.pgy3Medicine],
-    ["nights", "Nights", state.requirements.pgy3Nights]
-  ] as const) {
-    const credit = rotationCreditForResident(state, resident, rotationId, before10A);
-    if (credit + 0.001 < total) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        `pgy3.${rotationId}.before-10a`,
-        `${resident.name} needs ${total} ${label} block-equivalent${total === 1 ? "" : "s"} before Block 10A and has ${credit.toFixed(1)}.`,
-        { residentId: resident.id, rotationId }
-      );
+function blockRotationCredit(state: AppState, blockId: string, rotationId: string): number {
+  return state.residents.reduce((sum, resident) => sum + cellCredit(state.assignments[resident.id]?.[blockId], rotationId), 0);
+}
+
+function fmBlockRotationCredit(state: AppState, blockId: string, rotationId: string): number {
+  return state.residents
+    .filter((resident) => resident.pgy1Type === "fm")
+    .reduce((sum, resident) => sum + cellCredit(state.assignments[resident.id]?.[blockId], rotationId), 0);
+}
+
+function validateBlockCoverage(state: AppState, diagnostics: Diagnostic[]) {
+  const rules = [
+    { rotationId: "medicine", label: "Days", code: "days", min: 3, max: 4 },
+    { rotationId: "nights", label: "Nights", code: "nights", min: 2, max: 3 }
+  ] as const;
+  const blocks = orderedBlocks(state);
+
+  for (const rule of rules) {
+    let earlierAtMinimum = false;
+
+    for (const block of blocks) {
+      const credit = blockRotationCredit(state, block.id, rule.rotationId);
+      const fmCredit = fmBlockRotationCredit(state, block.id, rule.rotationId);
+
+      if (credit + 0.001 < rule.min) {
+        pushDiagnostic(
+          diagnostics,
+          "error",
+          `block.${rule.code}.min`,
+          `${block.name} needs at least ${rule.min} PGY1 on ${rule.label}; current total is ${credit.toFixed(1)}.`,
+          { blockId: block.id, rotationId: rule.rotationId }
+        );
+      }
+
+      if (credit - 0.001 > rule.max) {
+        pushDiagnostic(
+          diagnostics,
+          "error",
+          `block.${rule.code}.max`,
+          `${block.name} allows at most ${rule.max} PGY1 on ${rule.label}; current total is ${credit.toFixed(1)}.`,
+          { blockId: block.id, rotationId: rule.rotationId }
+        );
+      }
+
+      if (fmCredit - 0.001 > 1) {
+        pushDiagnostic(
+          diagnostics,
+          "warning",
+          `preference.fm-${rule.code}-balance`,
+          `${block.name} has ${fmCredit.toFixed(1)} FM PGY1 on ${rule.label}; prefer at most 1 FM per block when possible.`,
+          { blockId: block.id, rotationId: rule.rotationId }
+        );
+      }
+
+      if (earlierAtMinimum && credit > rule.min + 0.001) {
+        pushDiagnostic(
+          diagnostics,
+          "warning",
+          `preference.early-extra-${rule.code}`,
+          `${block.name} has ${credit.toFixed(1)} PGY1 on ${rule.label}; extra coverage above the minimum is preferred earlier in the schedule.`,
+          { blockId: block.id, rotationId: rule.rotationId }
+        );
+      }
+
+      if (Math.abs(credit - rule.min) <= 0.001) {
+        earlierAtMinimum = true;
+      }
     }
-  }
-
-  for (const [rotationId, label, total] of [
-    ["family-medicine", "Family Medicine", state.requirements.pgy3FamilyMedicine],
-    ["elective", "Elective", state.requirements.pgy3Elective]
-  ] as const) {
-    const credit = rotationCreditForResident(state, resident, rotationId);
-    if (credit + 0.001 < total) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        `pgy3.${rotationId}.total`,
-        `${resident.name} needs ${total} ${label} block-equivalent${total === 1 ? "" : "s"} and has ${credit.toFixed(1)}.`,
-        { residentId: resident.id, rotationId }
-      );
-    }
-  }
-
-  const block5A = blockByName(state.blocks, "5A");
-  if (block5A && !hasAnyRotation(state.assignments[resident.id]?.[block5A.id], "elective")) {
-    pushDiagnostic(
-      diagnostics,
-      "error",
-      "pgy3.elective-5a",
-      `${resident.name} must be on Elective in Block 5A.`,
-      { residentId: resident.id, blockId: block5A.id, rotationId: "elective" }
-    );
-  }
-
-  for (const [rotationId, label] of PGY3_CONSECUTIVE) {
-    validateConsecutiveRequirement(state, diagnostics, resident, rotationId, label);
-  }
-
-  const dermCredit = rotationCreditForResident(state, resident, "derm");
-  if (dermCredit < 1) {
-    pushDiagnostic(diagnostics, "error", "pgy3.derm.missing", `${resident.name} needs 1 block of Derm.`, {
-      residentId: resident.id,
-      rotationId: "derm"
-    });
   }
 }
 
-function validateChiefs(state: AppState, diagnostics: Diagnostic[]) {
-  const block1A = blockByName(state.blocks, "1A");
-  if (!block1A) return;
+function medicineNightsRotationsForResidentBlock(state: AppState, residentId: string, blockId: string) {
+  const cell = state.assignments[residentId]?.[blockId];
+  return {
+    medicine: cellCredit(cell, "medicine") > 0,
+    nights: cellCredit(cell, "nights") > 0
+  };
+}
 
-  for (const chief of state.residents.filter((resident) => resident.isChief)) {
-    const hasChiefCoverage =
-      hasAnyRotation(state.assignments[chief.id]?.[block1A.id], "medicine") ||
-      hasAnyRotation(state.assignments[chief.id]?.[block1A.id], "nights");
-    if (!hasChiefCoverage) {
-      pushDiagnostic(
-        diagnostics,
-        "error",
-        "chief.block-1a",
-        `${chief.name} is chief and must be assigned Medicine or Nights in Block 1A.`,
-        { residentId: chief.id, blockId: block1A.id }
-      );
+function validateDaysNightsAdjacencyPreference(state: AppState, diagnostics: Diagnostic[]) {
+  const blocks = orderedBlocks(state);
+
+  for (const resident of state.residents) {
+    for (let index = 0; index < blocks.length - 1; index += 1) {
+      const current = blocks[index];
+      const next = blocks[index + 1];
+      const currentRotations = medicineNightsRotationsForResidentBlock(state, resident.id, current.id);
+      const nextRotations = medicineNightsRotationsForResidentBlock(state, resident.id, next.id);
+      const daysToNights = currentRotations.medicine && nextRotations.nights;
+      const nightsToDays = currentRotations.nights && nextRotations.medicine;
+
+      if (daysToNights || nightsToDays) {
+        pushDiagnostic(
+          diagnostics,
+          "warning",
+          "preference.days-nights-adjacency",
+          `${resident.name} has adjacent Days and Nights in ${current.name} + ${next.name}; separate Days/Nights transitions when possible.`,
+          { residentId: resident.id, blockId: current.id, rotationId: daysToNights ? "medicine" : "nights" }
+        );
+      }
     }
   }
 }
@@ -502,24 +276,16 @@ export function validateSchedule(state: AppState): Diagnostic[] {
     pushDiagnostic(diagnostics, "error", "setup.no-residents", "Add at least one resident before generating a schedule.");
   }
 
-  validatePtoAndSplitRules(state, diagnostics);
-  validateCoverage(state, diagnostics);
+  validatePtoAndSplitGuardrails(state, diagnostics);
   validateCapacity(state, diagnostics);
-  validateChiefs(state, diagnostics);
+  validateResidentTypeRequirements(state, diagnostics);
+  validateBlockCoverage(state, diagnostics);
+  validateDaysNightsAdjacencyPreference(state, diagnostics);
 
   for (const resident of state.residents) {
     if (!resident.name.trim()) {
       pushDiagnostic(diagnostics, "error", "resident.name-missing", "Every resident needs a name.", { residentId: resident.id });
     }
-
-    if (resident.pgyLevel === 2) {
-      validatePgy2(state, diagnostics, resident);
-    } else {
-      validatePgy3(state, diagnostics, resident);
-    }
-    validateEarlyMedicineNightsPreferences(state, diagnostics, resident);
-    validateMedicineNightsTotalCaps(state, diagnostics, resident);
-    validateMedicineNightsTransitions(state, diagnostics, resident);
   }
 
   return diagnostics;

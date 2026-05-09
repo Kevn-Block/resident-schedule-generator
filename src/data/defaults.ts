@@ -1,4 +1,4 @@
-import type { AppState, AssignmentMatrix, Block, Requirements, Resident, Rotation } from "../types";
+import type { AppState, AssignmentMatrix, Block, Pgy1Type, Resident, Rotation } from "../types";
 import { applyPtoToAssignments, createAssignmentMatrix } from "../lib/schedule";
 
 const blockRows = [
@@ -48,11 +48,17 @@ export const defaultBlocks: Block[] = blockRows.map(([name, startDate, endDate],
 });
 
 export const defaultRotations: Rotation[] = [
-  { id: "medicine", name: "Medicine", builtIn: true, minPerBlock: 1, maxPerBlock: 20, canSplitWithHalfPto: false },
-  { id: "nights", name: "Nights", builtIn: true, minPerBlock: 1, maxPerBlock: 20, canSplitWithHalfPto: false },
-  { id: "family-medicine", name: "Family Medicine", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: true },
+  { id: "medicine", name: "Medicine", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "nights", name: "Nights", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "em", name: "EM", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "op-peds", name: "OP Ped", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "psych", name: "Psych", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "surgery", name: "Surgery", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "endo", name: "Endo", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "uro", name: "Uro", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "cardio", name: "Cardio", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
+  { id: "family-medicine", name: "FM Clinic", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: true },
   { id: "obgyn", name: "OBGYN", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
-  { id: "op-peds", name: "OP Peds", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
   { id: "ss-peds", name: "SS Peds", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
   { id: "ent", name: "ENT", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
   { id: "rheum", name: "Rheum", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false },
@@ -65,28 +71,21 @@ export const defaultRotations: Rotation[] = [
   { id: "elective", name: "Elective", builtIn: true, minPerBlock: 0, maxPerBlock: 20, canSplitWithHalfPto: false }
 ];
 
-export const defaultRequirements: Requirements = {
-  pgy2Medicine: 3,
-  pgy2Nights: 3,
-  pgy3Medicine: 3,
-  pgy3Nights: 3,
-  pgy2FamilyMedicine: 4,
-  pgy3FamilyMedicine: 3,
-  pgy2Elective: 3,
-  pgy3Elective: 6
-};
-
 export function emptyPtoByBlock(blocks: Block[] = defaultBlocks) {
   return Object.fromEntries(blocks.map((block) => [block.id, "none" as const]));
 }
 
-export function createResident(name: string, pgyLevel: 2 | 3, isChief = false, blocks: Block[] = defaultBlocks): Resident {
+export function createResident(name: string, pgy1Type: Pgy1Type = "fm", isChief = false, blocks: Block[] = defaultBlocks): Resident {
   const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${crypto.randomUUID().slice(0, 8)}`;
   return {
     id,
     name,
-    pgyLevel,
+    pgy1Type,
     isChief,
+    isMatched: false,
+    matchedDetails: "",
+    isUnmatched: false,
+    unmatchedDetails: "",
     ptoByBlock: emptyPtoByBlock(blocks)
   };
 }
@@ -97,22 +96,21 @@ export function createDefaultState(residents: Resident[] = []): AppState {
     residents,
     blocks: defaultBlocks,
     rotations: defaultRotations,
-    requirements: defaultRequirements,
     assignments
   });
 }
 
 export function createDemoState(): AppState {
   const residents = [
-    createResident("Avery Chen", 2),
-    createResident("Jordan Malik", 2),
-    createResident("Sam Rivera", 2),
-    createResident("Riley Lawson", 2),
-    createResident("Jamie Ortiz", 2),
-    createResident("Taylor Brooks", 3, true),
-    createResident("Morgan Shah", 3),
-    createResident("Casey Nguyen", 3),
-    createResident("Drew Patel", 3)
+    createResident("Avery Chen", "fm"),
+    createResident("Jordan Malik", "fm"),
+    createResident("Sam Rivera", "ty"),
+    createResident("Riley Lawson", "fm"),
+    createResident("Jamie Ortiz", "ty"),
+    createResident("Taylor Brooks", "fm", true),
+    createResident("Morgan Shah", "fm"),
+    createResident("Casey Nguyen", "ty"),
+    createResident("Drew Patel", "fm")
   ];
 
   return createDefaultState(residents);

@@ -28,7 +28,8 @@ import {
   setFullAssignment
 } from "./lib/schedule";
 import { hasErrors, validateSchedule } from "./lib/validation";
-import type { AppState, Block, Diagnostic, PgyLevel, PtoSelection, Resident, Rotation } from "./types";
+import { PGY1_TYPE_LABELS } from "./types";
+import type { AppState, Block, Diagnostic, Pgy1Type, PtoSelection, Resident, Rotation } from "./types";
 
 const STORAGE_KEY = "resident-schedule-maker-state-v1";
 
@@ -38,17 +39,39 @@ function normalizeRotations(rotations: Rotation[] | undefined): Rotation[] {
   const defaultIds = new Set(defaultRotations.map((rotation) => rotation.id));
   const builtIns = defaultRotations.map((defaultRotation) => {
     const current = existingById.get(defaultRotation.id);
-    return current ? { ...current, name: defaultRotation.name, builtIn: true } : defaultRotation;
+    return current ? { ...current, name: defaultRotation.name, builtIn: true, minPerBlock: defaultRotation.minPerBlock } : defaultRotation;
   });
   const custom = existing.filter((rotation) => !defaultIds.has(rotation.id));
 
   return [...builtIns, ...custom];
 }
 
+function normalizeResidents(residents: Resident[] | undefined, blocks: Block[]): Resident[] {
+  const emptyPto = Object.fromEntries(blocks.map((block) => [block.id, "none" as const]));
+
+  return (residents ?? []).map((resident) => {
+    const pgy1Type = resident.pgy1Type === "ty" || resident.pgy1Type === "fm" ? resident.pgy1Type : "fm";
+
+    return {
+      id: resident.id,
+      name: resident.name ?? "",
+      pgy1Type,
+      isChief: Boolean(resident.isChief),
+      isMatched: pgy1Type === "ty" ? Boolean(resident.isMatched) : false,
+      matchedDetails: pgy1Type === "ty" ? resident.matchedDetails ?? "" : "",
+      isUnmatched: pgy1Type === "ty" ? Boolean(resident.isUnmatched) : false,
+      unmatchedDetails: pgy1Type === "ty" ? resident.unmatchedDetails ?? "" : "",
+      ptoByBlock: { ...emptyPto, ...(resident.ptoByBlock ?? {}) } as Record<string, PtoSelection>
+    };
+  });
+}
+
 function normalizeState(state: AppState): AppState {
   return ensureAssignmentShape({
-    ...state,
-    rotations: normalizeRotations(state.rotations)
+    residents: normalizeResidents(state.residents, state.blocks),
+    blocks: state.blocks,
+    rotations: normalizeRotations(state.rotations),
+    assignments: state.assignments ?? {}
   });
 }
 
@@ -103,6 +126,28 @@ function severityIcon(severity: Diagnostic["severity"]) {
   return <CheckCircle2 aria-hidden="true" size={16} />;
 }
 
+function protectedBlockLabel(selection: PtoSelection, electiveLabel = "") {
+  if (selection === "full") return "PTO";
+  if (selection === "elective") return electiveLabel.trim() ? `Elective: ${electiveLabel.trim()}` : "Elective";
+  if (selection === "first-half") return "H1 PTO / H2 FM Clinic";
+  if (selection === "second-half") return "H1 FM Clinic / H2 PTO";
+  return "";
+}
+
+function residentTypeDescription(resident: Resident) {
+  const base = `${PGY1_TYPE_LABELS[resident.pgy1Type]} PGY1`;
+  if (resident.pgy1Type !== "ty") return base;
+  if (resident.isMatched) {
+    const details = resident.matchedDetails.trim();
+    return details ? `${base} Matched: ${details}` : `${base} Matched`;
+  }
+  if (resident.isUnmatched) {
+    const details = resident.unmatchedDetails.trim();
+    return details ? `${base} Unmatched: ${details}` : `${base} Unmatched`;
+  }
+  return base;
+}
+
 export default function App() {
   const [state, setState] = useState<AppState>(loadInitialState);
   const [generationDiagnostics, setGenerationDiagnostics] = useState<Diagnostic[] | null>(null);
@@ -146,7 +191,7 @@ export default function App() {
   const addResident = () => {
     updateState((current) => ({
       ...current,
-      residents: [...current.residents, createResident("New Resident", 2, false, current.blocks)]
+      residents: [...current.residents, createResident("New Resident", "fm", false, current.blocks)]
     }));
   };
 
@@ -157,7 +202,7 @@ export default function App() {
     }));
   };
 
-  const updatePto = (residentId: string, blockId: string, selection: PtoSelection) => {
+  const updateProtectedBlockSelection = (residentId: string, blockId: string, selection: PtoSelection) => {
     setAndSyncPto((current) => ({
       ...current,
       residents: current.residents.map((resident) =>
@@ -173,13 +218,6 @@ export default function App() {
       ...current,
       residents: current.residents.filter((resident) => resident.id !== residentId),
       assignments: Object.fromEntries(Object.entries(current.assignments).filter(([id]) => id !== residentId))
-    }));
-  };
-
-  const updateRequirement = (key: keyof AppState["requirements"], value: number) => {
-    updateState((current) => ({
-      ...current,
-      requirements: { ...current.requirements, [key]: Math.max(0, value) }
     }));
   };
 
@@ -311,9 +349,9 @@ export default function App() {
             onAdd={addResident}
             onUpdate={updateResident}
             onDelete={deleteResident}
-            onPtoChange={updatePto}
+            onProtectedBlockSelectionChange={updateProtectedBlockSelection}
+            onElectiveLabelChange={setAssignmentElectiveLabel}
           />
-          <RulesPanel state={state} onRequirementChange={updateRequirement} />
           <RotationsPanel state={state} onUpdate={updateRotation} onAdd={() => updateState((current) => ({ ...current, rotations: [...current.rotations, makeCustomRotation()] }))} onDelete={deleteRotation} />
           <BlocksPanel blocks={blocks} onAdd={addBlock} onUpdate={updateBlock} onDelete={deleteBlock} />
           <button className="button primary full-width-action" type="button" onClick={addResident} aria-label="Add resident at bottom">
@@ -352,14 +390,32 @@ interface ResidentsPanelProps {
   onAdd: () => void;
   onUpdate: (residentId: string, patch: Partial<Resident>) => void;
   onDelete: (residentId: string) => void;
-  onPtoChange: (residentId: string, blockId: string, selection: PtoSelection) => void;
+  onProtectedBlockSelectionChange: (residentId: string, blockId: string, selection: PtoSelection) => void;
+  onElectiveLabelChange: (residentId: string, blockId: string, label: string) => void;
 }
 
-function ResidentsPanel({ state, blocks, onAdd, onUpdate, onDelete, onPtoChange }: ResidentsPanelProps) {
+function ResidentsPanel({
+  state,
+  blocks,
+  onAdd,
+  onUpdate,
+  onDelete,
+  onProtectedBlockSelectionChange,
+  onElectiveLabelChange
+}: ResidentsPanelProps) {
   const [expandedPto, setExpandedPto] = useState<Record<string, boolean>>({});
 
   const togglePto = (residentId: string) => {
     setExpandedPto((current) => ({ ...current, [residentId]: !current[residentId] }));
+  };
+
+  const updatePgy1Type = (residentId: string, pgy1Type: Pgy1Type) => {
+    onUpdate(
+      residentId,
+      pgy1Type === "fm"
+        ? { pgy1Type, isMatched: false, matchedDetails: "", isUnmatched: false, unmatchedDetails: "" }
+        : { pgy1Type }
+    );
   };
 
   return (
@@ -367,7 +423,7 @@ function ResidentsPanel({ state, blocks, onAdd, onUpdate, onDelete, onPtoChange 
       <div className="panel-heading">
         <div>
           <p className="eyebrow">Setup</p>
-          <h2>Residents & PTO</h2>
+          <h2>Residents, PTO & Electives</h2>
         </div>
         <button className="icon-button" type="button" onClick={onAdd} title="Add resident" aria-label="Add resident">
           <Plus aria-hidden="true" size={18} />
@@ -387,12 +443,12 @@ function ResidentsPanel({ state, blocks, onAdd, onUpdate, onDelete, onPtoChange 
                   onChange={(event) => onUpdate(resident.id, { name: event.target.value })}
                 />
                 <select
-                  aria-label="PGY level"
-                  value={resident.pgyLevel}
-                  onChange={(event) => onUpdate(resident.id, { pgyLevel: Number(event.target.value) as PgyLevel })}
+                  aria-label="PGY1 type"
+                  value={resident.pgy1Type}
+                  onChange={(event) => updatePgy1Type(resident.id, event.target.value as Pgy1Type)}
                 >
-                  <option value={2}>PGY2</option>
-                  <option value={3}>PGY3</option>
+                  <option value="fm">FM PGY1</option>
+                  <option value="ty">TY PGY1</option>
                 </select>
                 <label className="check-label">
                   <input
@@ -412,78 +468,111 @@ function ResidentsPanel({ state, blocks, onAdd, onUpdate, onDelete, onPtoChange 
                   <Trash2 aria-hidden="true" size={16} />
                 </button>
               </div>
+              {resident.pgy1Type === "ty" && (
+                <div className="ty-metadata-fields">
+                  <div className="ty-match-row">
+                    <label className="check-label">
+                      <input
+                        type="checkbox"
+                        checked={resident.isMatched}
+                        onChange={(event) =>
+                          onUpdate(resident.id, {
+                            isMatched: event.target.checked,
+                            matchedDetails: event.target.checked ? resident.matchedDetails : "",
+                            isUnmatched: event.target.checked ? false : resident.isUnmatched,
+                            unmatchedDetails: event.target.checked ? "" : resident.unmatchedDetails
+                          })
+                        }
+                      />
+                      Matched
+                    </label>
+                    {resident.isMatched && (
+                      <input
+                        aria-label={`${resident.name} matched details`}
+                        placeholder="Write in details"
+                        value={resident.matchedDetails}
+                        onChange={(event) => onUpdate(resident.id, { matchedDetails: event.target.value })}
+                      />
+                    )}
+                  </div>
+                  <div className="ty-match-row">
+                    <label className="check-label">
+                      <input
+                        type="checkbox"
+                        checked={resident.isUnmatched}
+                        onChange={(event) =>
+                          onUpdate(resident.id, {
+                            isMatched: event.target.checked ? false : resident.isMatched,
+                            matchedDetails: event.target.checked ? "" : resident.matchedDetails,
+                            isUnmatched: event.target.checked,
+                            unmatchedDetails: event.target.checked ? resident.unmatchedDetails : ""
+                          })
+                        }
+                      />
+                      Unmatched
+                    </label>
+                    {resident.isUnmatched && (
+                      <input
+                        aria-label={`${resident.name} unmatched details`}
+                        placeholder="Write in details"
+                        value={resident.unmatchedDetails}
+                        onChange={(event) => onUpdate(resident.id, { unmatchedDetails: event.target.value })}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="resident-bottom-actions">
                 <button
                   className="button compact-button"
                   type="button"
                   onClick={() => togglePto(resident.id)}
                   aria-expanded={Boolean(expandedPto[resident.id])}
-                  title={`${expandedPto[resident.id] ? "Hide" : "Show"} PTO for ${resident.name}`}
+                  title={`${expandedPto[resident.id] ? "Hide" : "Show"} PTO and electives for ${resident.name}`}
                 >
                   <CalendarDays aria-hidden="true" size={16} />
-                  {expandedPto[resident.id] ? "Hide PTO" : "Show PTO"}
+                  {expandedPto[resident.id] ? "Hide PTO / Electives" : "Show PTO / Electives"}
                 </button>
               </div>
               {expandedPto[resident.id] && (
-                <div className="pto-strip" aria-label={`${resident.name} PTO selections`}>
-                  {blocks.map((block) => (
-                    <label key={block.id}>
-                      <span>{block.name}</span>
-                      <select
-                        value={resident.ptoByBlock[block.id] ?? "none"}
-                        onChange={(event) => onPtoChange(resident.id, block.id, event.target.value as PtoSelection)}
-                      >
-                        <option value="none">None</option>
-                        <option value="full">Full PTO</option>
-                        <option value="first-half">H1 PTO</option>
-                        <option value="second-half">H2 PTO</option>
-                      </select>
-                    </label>
-                  ))}
+                <div className="pto-strip" aria-label={`${resident.name} protected block selections`}>
+                  {blocks.map((block) => {
+                    const selection = resident.ptoByBlock[block.id] ?? "none";
+                    const electiveLabel = getElectiveLabel(assignmentFor(state, resident.id, block.id));
+
+                    return (
+                      <label key={block.id}>
+                        <span>{block.name}</span>
+                        <select
+                          value={selection}
+                          onChange={(event) =>
+                            onProtectedBlockSelectionChange(resident.id, block.id, event.target.value as PtoSelection)
+                          }
+                        >
+                          <option value="none">None</option>
+                          <option value="full">Full PTO</option>
+                          {resident.pgy1Type === "fm" && <option value="first-half">H1 PTO</option>}
+                          {resident.pgy1Type === "fm" && <option value="second-half">H2 PTO</option>}
+                          <option value="elective">Elective</option>
+                        </select>
+                        {selection === "elective" && (
+                          <input
+                            className="protected-elective-input"
+                            aria-label={`${resident.name} ${block.name} protected elective label`}
+                            placeholder="Elective name"
+                            value={electiveLabel}
+                            onChange={(event) => onElectiveLabelChange(resident.id, block.id, event.target.value)}
+                          />
+                        )}
+                      </label>
+                    );
+                  })}
                 </div>
               )}
             </div>
           ))}
         </div>
       )}
-    </section>
-  );
-}
-
-function RulesPanel({ state, onRequirementChange }: { state: AppState; onRequirementChange: (key: keyof AppState["requirements"], value: number) => void }) {
-  const fields: Array<[keyof AppState["requirements"], string]> = [
-    ["pgy2Medicine", "PGY2 Medicine"],
-    ["pgy2Nights", "PGY2 Nights"],
-    ["pgy2FamilyMedicine", "PGY2 Family Med"],
-    ["pgy2Elective", "PGY2 Elective"],
-    ["pgy3Medicine", "PGY3 Medicine before 10A"],
-    ["pgy3Nights", "PGY3 Nights before 10A"],
-    ["pgy3FamilyMedicine", "PGY3 Family Med"],
-    ["pgy3Elective", "PGY3 Elective"]
-  ];
-
-  return (
-    <section className="panel">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">Rules</p>
-          <h2>Counts</h2>
-        </div>
-      </div>
-      <div className="rule-grid">
-        {fields.map(([key, label]) => (
-          <label key={key}>
-            <span>{label}</span>
-            <input
-              type="number"
-              min={0}
-              step={0.5}
-              value={state.requirements[key]}
-              onChange={(event) => onRequirementChange(key, Number(event.target.value))}
-            />
-          </label>
-        ))}
-      </div>
     </section>
   );
 }
@@ -652,7 +741,6 @@ function ScheduleGrid({
   onElectiveLabelChange: (residentId: string, blockId: string, label: string) => void;
 }) {
   const fullOptions = state.rotations;
-  const splitOptions = state.rotations.filter((rotation) => rotation.canSplitWithHalfPto);
 
   if (state.residents.length === 0) {
     return <p className="empty-state">No residents yet.</p>;
@@ -680,20 +768,20 @@ function ScheduleGrid({
               <th className="sticky-col">
                 <span>{resident.name || "Unnamed"}</span>
                 <small>
-                  PGY{resident.pgyLevel}
+                  {residentTypeDescription(resident)}
                   {resident.isChief ? " Chief" : ""}
                 </small>
               </th>
               {blocks.map((block) => {
                 const cell = assignmentFor(state, resident.id, block.id);
                 const pto = resident.ptoByBlock[block.id] ?? "none";
-                const options = pto === "none" ? fullOptions : splitOptions;
                 const value = getSegmentRotation(cell);
                 const electiveLabel = getElectiveLabel(cell);
+                const isProtectedSelection = pto !== "none";
                 return (
                   <td key={block.id}>
-                    {pto === "full" ? (
-                      <span className="pto-pill">PTO</span>
+                    {isProtectedSelection ? (
+                      <span className="pto-pill">{protectedBlockLabel(pto, electiveLabel)}</span>
                     ) : (
                       <select
                         aria-label={`${resident.name} ${block.name} assignment`}
@@ -702,14 +790,14 @@ function ScheduleGrid({
                         onChange={(event) => onAssignmentChange(resident.id, block.id, event.target.value)}
                       >
                         <option value="">{pto === "none" ? "Open" : "Half open"}</option>
-                        {options.map((rotation) => (
+                        {fullOptions.map((rotation) => (
                           <option key={rotation.id} value={rotation.id}>
                             {rotation.name}
                           </option>
                         ))}
                       </select>
                     )}
-                    {value === "elective" && (
+                    {value === "elective" && pto !== "elective" && (
                       <input
                         className="elective-label-input"
                         aria-label={`${resident.name} ${block.name} elective label`}
@@ -718,8 +806,6 @@ function ScheduleGrid({
                         onChange={(event) => onElectiveLabelChange(resident.id, block.id, event.target.value)}
                       />
                     )}
-                    {pto === "first-half" && <small className="half-note">H1 PTO</small>}
-                    {pto === "second-half" && <small className="half-note">H2 PTO</small>}
                   </td>
                 );
               })}
